@@ -9,7 +9,6 @@ from sklearn.cluster import HDBSCAN
 from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
 
-
 def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.40):
     """
     Runs species detection using the customized species list Analyzer,
@@ -78,8 +77,6 @@ def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.40):
                 # If coercion fails for a specific chunk, log it and keep going
                 print(f"   [Warning] Failed to parse embedding element: {e}")
                 cleaned_embeddings.append(None)
-
-
 
     chunks_metadata = []
 
