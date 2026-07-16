@@ -10,7 +10,7 @@ from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
 
 
-def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.10):
+def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.40):
     """
     Runs species detection using the customized species list Analyzer,
     then dynamically builds a patched Analyzer to extract 1024-D embeddings.
@@ -44,15 +44,42 @@ def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.10):
         # IMMEDIATELY restore the original interpreter to keep the environment clean
         tf.lite.Interpreter = original_interpreter
 
-    # --- Clean the extracted dictionary arrays (TF 2.16+ wrapper fix) ---
-    cleaned_embeddings = []
-    for emb in raw_embeddings:
-        if isinstance(emb, dict) and 'array' in emb:
-            cleaned_embeddings.append(np.array(emb['array']).flatten())
-        elif isinstance(emb, np.ndarray):
-            cleaned_embeddings.append(emb.flatten())
-        else:
-            cleaned_embeddings.append(None)
+        # --- Clean the extracted dictionary arrays (TF 2.16+ wrapper fix) ---
+        cleaned_embeddings = []
+        for emb in raw_embeddings:
+            if emb is None:
+                cleaned_embeddings.append(None)
+                continue
+
+            try:
+                # 1. If it's a TensorFlow EagerTensor (has .numpy() method)
+                if hasattr(emb, 'numpy'):
+                    cleaned_embeddings.append(emb.numpy().flatten())
+
+                # 2. If it's a dictionary (older BirdNET-Analyzer formats)
+                elif isinstance(emb, dict):
+                    # Try getting 'array', fallback to 'embeddings', or the first value
+                    val = emb.get('array') or emb.get('embeddings') or list(emb.values())[0]
+                    cleaned_embeddings.append(np.asarray(val).flatten())
+
+                # 3. If it's already a numpy array
+                elif isinstance(emb, np.ndarray):
+                    cleaned_embeddings.append(emb.flatten())
+
+                # 4. Fallback: Try converting lists, tuples, or any other iterable directly
+                else:
+                    arr = np.asarray(emb)
+                    if arr.size > 0:
+                        cleaned_embeddings.append(arr.flatten())
+                    else:
+                        cleaned_embeddings.append(None)
+
+            except Exception as e:
+                # If coercion fails for a specific chunk, log it and keep going
+                print(f"   [Warning] Failed to parse embedding element: {e}")
+                cleaned_embeddings.append(None)
+
+
 
     chunks_metadata = []
 
@@ -130,7 +157,7 @@ def run_pipeline(audio_dir, output_dir, species_list_path=None):
             try:
                 # Call the updated extraction function (removed the extra analyzer parameter)
                 detections, embeddings, metadata = extract_embeddings_and_detect(
-                    file_path, analyzer, min_conf=0.10
+                    file_path, analyzer, min_conf=0.4
                 )
 
                 if len(embeddings) > 0:
@@ -161,14 +188,32 @@ def run_pipeline(audio_dir, output_dir, species_list_path=None):
         print("\n--- Running Dimensionality Reduction & Clustering ---")
         X = np.vstack(all_embeddings)
 
-        print("Projecting 1024-D embeddings to 2D with UMAP...")
-        reducer = umap.UMAP(n_neighbors=15, min_dist=0.1, n_components=2, random_state=42)
-        X_2d = reducer.fit_transform(X)
+        # 1. Normalize embeddings (essential for cosine distance)
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        X_normalized = np.where(norms == 0, X, X / norms)
 
-        print("Clustering 2D coordinates with HDBSCAN...")
-        clusterer = HDBSCAN(min_cluster_size=5, min_samples=2)
-        cluster_labels = clusterer.fit_predict(X_2d)
+        # 2. Cluster directly on high-dimensional space (or a moderate 10-D UMAP space)
+        # This prevents 2D projection artifacts from tearing your clusters apart.
+        print("Clustering high-dimensional embeddings with HDBSCAN...")
+        clusterer = HDBSCAN(
+            min_cluster_size=5,  # Increased to prevent 3-second micro-clusters
+            min_samples=5,  # Higher values suppress noise/consecutive segment matching
+            metric='cosine'  # Cosine distance is highly superior for BirdNET embeddings
+        )
+        cluster_labels = clusterer.fit_predict(X_normalized)
 
+        # 3. Project to 2D ONLY for visualization/mapping purposes
+        print("Projecting embeddings to 2D with UMAP for visualization...")
+        reducer = umap.UMAP(
+            n_neighbors=25,  # Increased to keep global structure intact
+            min_dist=0.15,
+            n_components=2,
+            metric='cosine',  # Match the clustering metric
+            random_state=42
+        )
+        X_2d = reducer.fit_transform(X_normalized)
+
+        # 4. Build DataFrame
         df = pd.DataFrame(all_metadata)
         df['umap_x'] = X_2d[:, 0]
         df['umap_y'] = X_2d[:, 1]
