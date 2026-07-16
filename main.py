@@ -183,41 +183,50 @@ def run_pipeline(audio_dir, output_dir, species_list_path=None):
 
             f_out.write("\n" + "=" * 50 + "\n\n")
 
-    # --- CLUSTERING & DIMENSIONALITY REDUCTION STAGE ---
-    if all_embeddings:
-        print("\n--- Running Dimensionality Reduction & Clustering ---")
-        X = np.vstack(all_embeddings)
+        if all_embeddings:
+            print("\n--- Running Dimensionality Reduction & Clustering ---")
+            X = np.vstack(all_embeddings)
 
-        # 1. Normalize embeddings (essential for cosine distance)
-        norms = np.linalg.norm(X, axis=1, keepdims=True)
-        X_normalized = np.where(norms == 0, X, X / norms)
+            # 1. Normalize embeddings (essential for cosine distance)
+            norms = np.linalg.norm(X, axis=1, keepdims=True)
+            X_normalized = np.where(norms == 0, X, X / norms)
 
-        # 2. Cluster directly on high-dimensional space (or a moderate 10-D UMAP space)
-        # This prevents 2D projection artifacts from tearing your clusters apart.
-        print("Clustering high-dimensional embeddings with HDBSCAN...")
-        clusterer = HDBSCAN(
-            min_cluster_size=5,  # Increased to prevent 3-second micro-clusters
-            min_samples=5,  # Higher values suppress noise/consecutive segment matching
-            metric='cosine'  # Cosine distance is highly superior for BirdNET embeddings
-        )
-        cluster_labels = clusterer.fit_predict(X_normalized)
+            # 2. Reduce to a moderate-dimensional space FIRST, then cluster on that.
+            # Clustering directly on 1024-D embeddings collapses HDBSCAN to ~1 cluster + noise.
+            print("Reducing embeddings to 10-D with UMAP for clustering...")
+            cluster_reducer = umap.UMAP(
+                n_neighbors=15,
+                min_dist=0.0,
+                n_components=8,
+                metric='cosine',
+                random_state=42
+            )
+            X_umap = cluster_reducer.fit_transform(X_normalized)
 
-        # 3. Project to 2D ONLY for visualization/mapping purposes
-        print("Projecting embeddings to 2D with UMAP for visualization...")
-        reducer = umap.UMAP(
-            n_neighbors=25,  # Increased to keep global structure intact
-            min_dist=0.15,
-            n_components=2,
-            metric='cosine',  # Match the clustering metric
-            random_state=42
-        )
-        X_2d = reducer.fit_transform(X_normalized)
+            print("Clustering reduced embeddings with HDBSCAN...")
+            clusterer = HDBSCAN(
+                min_cluster_size=4,
+                min_samples=3,
+                metric='euclidean'  # fixed typo; valid since UMAP output is euclidean space
+            )
+            cluster_labels = clusterer.fit_predict(X_umap)
 
-        # 4. Build DataFrame
-        df = pd.DataFrame(all_metadata)
-        df['umap_x'] = X_2d[:, 0]
-        df['umap_y'] = X_2d[:, 1]
-        df['cluster'] = cluster_labels
+            # 3. Separate UMAP run, purely for 2D visualization
+            print("Projecting embeddings to 2D with UMAP for visualization...")
+            viz_reducer = umap.UMAP(
+                n_neighbors=15,
+                min_dist=0.0,
+                n_components=2,
+                metric='cosine',
+                random_state=42
+            )
+            X_2d = viz_reducer.fit_transform(X_normalized)
+
+            # 4. Build DataFrame
+            df = pd.DataFrame(all_metadata)
+            df['umap_x'] = X_2d[:, 0]
+            df['umap_y'] = X_2d[:, 1]
+            df['cluster'] = cluster_labels
 
         csv_path = output_path / f"acoustic_clusters_{timestamp}.csv"
         df.to_csv(csv_path, index=False)
