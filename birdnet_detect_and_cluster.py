@@ -12,7 +12,8 @@ from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
 import shutil
 
-def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.40):
+
+def extract_embeddings_and_detect(file_path, analyzer, min_conf):
     """
     Runs species detection using the customized species list Analyzer,
     then dynamically builds a patched Analyzer to extract 1024-D embeddings.
@@ -115,12 +116,14 @@ def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.40):
         })
 
     # Filter out any None values from the final array to prevent stacking errors downstream
-    valid_embeddings = [e for e in cleaned_embeddings if e is not None and e.shape[0] == 1024]
+    valid_embeddings = [e for e in cleaned_embeddings if e is not None and e.shape[0] != 1024]
+    # Note sur why this was changed leaving in a comment to revert
+    #valid_embeddings = [e for e in cleaned_embeddings if e is not None and e.shape[0] == 1024]
 
     return detections, np.array(valid_embeddings), chunks_metadata
 
 
-def run_pipeline(audio_dir, output_dir, use_path, species_list_path=None):
+def run_pipeline(audio_dir, output_dir, use_path, min_conf, species_list_path=None):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
     if use_path:
@@ -160,9 +163,9 @@ def run_pipeline(audio_dir, output_dir, use_path, species_list_path=None):
             f_out.write(f"=== File: {file_path.name} ===\n")
 
             try:
-                # Call the updated extraction function (removed the extra analyzer parameter)
+                # Pass min_conf through to the detection function
                 detections, embeddings, metadata = extract_embeddings_and_detect(
-                    file_path, analyzer, min_conf=0.4
+                    file_path, analyzer, min_conf=min_conf
                 )
 
                 if len(embeddings) > 0:
@@ -197,7 +200,6 @@ def run_pipeline(audio_dir, output_dir, use_path, species_list_path=None):
             X_normalized = np.where(norms == 0, X, X / norms)
 
             # 2. Reduce to a moderate-dimensional space FIRST, then cluster on that.
-            # Clustering directly on 1024-D embeddings collapses HDBSCAN to ~1 cluster + noise.
             print("Reducing embeddings to 10-D with UMAP for clustering...")
             cluster_reducer = umap.UMAP(
                 n_neighbors=15,
@@ -212,7 +214,7 @@ def run_pipeline(audio_dir, output_dir, use_path, species_list_path=None):
             clusterer = HDBSCAN(
                 min_cluster_size=4,
                 min_samples=3,
-                metric='euclidean'  # fixed typo; valid since UMAP output is euclidean space
+                metric='euclidean'
             )
             cluster_labels = clusterer.fit_predict(X_umap)
 
@@ -249,7 +251,6 @@ def run_pipeline(audio_dir, output_dir, use_path, species_list_path=None):
         archive_dir_path.mkdir(parents=True, exist_ok=True)
         for file_path in audio_files:
             try:
-                # Construct destination path: target_folder / filename.wav
                 destination = archive_dir_path / file_path.name
                 shutil.move(str(file_path), str(destination))
                 print(f"Moved: {file_path.name} -> {archive_dir_path.name}/")
@@ -263,5 +264,8 @@ if __name__ == "__main__":
     OUTPUT_DIRECTORY = "C:\\temp\\CHIPBOT_DATA_ROOT\\output"
     SPECIES_LIST = "C:\\temp\\CHIPBOT_DATA_ROOT\\species\\midwest.txt"
 
+    # Set your minimum confidence score threshold here
+    MIN_CONFIDENCE = 0.6
+
     run_pipeline(audio_dir=AUDIO_DIRECTORY, output_dir=OUTPUT_DIRECTORY,
-                 species_list_path=SPECIES_LIST, use_path=USE_PATH)
+                 species_list_path=SPECIES_LIST, use_path=USE_PATH, min_conf=MIN_CONFIDENCE)
