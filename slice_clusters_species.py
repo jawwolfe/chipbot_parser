@@ -19,49 +19,22 @@ the corresponding source WAV file, then concatenates all segments that
 share the same `cluster` value (across all source files, sorted by
 filename then start_time) into one output WAV file per cluster.
 
-Usage:
-    python split_by_cluster_identified.py \
-        --csv segments.csv \
-        --audio-dir /path/to/source/wavs \
-        --out-dir /path/to/output \
-        [--min-confidence 0.0] \
-        [--gap-ms 0]
-
 Notes:
 - "Identified species" means birdnet_label is present and not equal to
   "Unidentified/Ambient" (case-insensitive, whitespace-trimmed match).
 - All source WAVs are assumed to share the same sample rate, sample
   width, and channel count. If a mismatch is found, the script raises a
   clear error rather than silently producing corrupt audio.
-- `--gap-ms` optionally inserts N milliseconds of silence between
-  concatenated segments in the output file (default: 0).
 """
 
-import argparse
 import csv
 import os
 import re
 import sys
 import wave
 from collections import defaultdict
-
+from pathlib import Path
 IGNORED_LABEL = "unidentified/ambient"
-
-
-def parse_args():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--csv", required=True, help="Path to the input CSV file")
-    p.add_argument("--audio-dir", required=True, help="Directory containing the source WAV files")
-    p.add_argument("--out-dir", required=True, help="Directory to write per-cluster output WAV files")
-    p.add_argument("--min-confidence", type=float, default=None,
-                   help="Optional: skip rows with confidence below this value")
-    p.add_argument("--gap-ms", type=float, default=0.0,
-                   help="Silence (ms) to insert between concatenated segments (default: 0)")
-    p.add_argument("--prefix", default="cluster_", help="Filename prefix for outputs (default: 'cluster_')")
-    p.add_argument("--max-species-name-length", type=int, default=120,
-                   help="Max characters for the species portion of the filename before it's "
-                        "truncated with a '+N_more' suffix (default: 120)")
-    return p.parse_args()
 
 
 def read_rows(csv_path, min_confidence):
@@ -193,11 +166,11 @@ def extract_segment_bytes(wf, params, start_time, end_time):
     return data
 
 
-def main():
-    args = parse_args()
-    os.makedirs(args.out_dir, exist_ok=True)
+def run(csv_in, audio_dir, out_dir, min_confidence=None, gap_ms=0.0, file_prefix="cluster_",
+        max_species_name_length=120):
+    os.makedirs(out_dir, exist_ok=True)
 
-    rows = read_rows(args.csv, args.min_confidence)
+    rows = read_rows(csv_in, min_confidence)
     if not rows:
         sys.exit("No identified-species rows found in CSV after filtering.")
 
@@ -208,7 +181,7 @@ def main():
     for cluster in by_cluster:
         by_cluster[cluster].sort(key=lambda r: (r["file"], r["start"]))
 
-    cache = WavCache(args.audio_dir)
+    cache = WavCache(audio_dir)
 
     # Validate all referenced files share the same audio format up front
     reference_params = None
@@ -234,7 +207,7 @@ def main():
     sampwidth = reference_params.sampwidth
     nchannels = reference_params.nchannels
     silence_frame = b"\x00" * (sampwidth * nchannels)
-    gap_frames = int(round((args.gap_ms / 1000.0) * framerate)) if args.gap_ms > 0 else 0
+    gap_frames = int(round((gap_ms / 1000.0) * framerate)) if gap_ms > 0 else 0
     gap_bytes = silence_frame * gap_frames
 
     print(f"Found {len(rows)} identified-species segments across {len(all_files)} "
@@ -242,15 +215,15 @@ def main():
 
     for cluster, group in sorted(by_cluster.items(), key=lambda kv: kv[0]):
         labels = sorted({r["label"] for r in group})
-        species_slug = all_species_slug(group, max_length=args.max_species_name_length)
-        out_path = os.path.join(args.out_dir, f"{args.prefix}{cluster}_{species_slug}.wav")
+        species_slug = all_species_slug(group, max_length=max_species_name_length)
+        out_path = os.path.join(OUT_DIR, f"{file_prefix}{cluster}_{species_slug}.wav")
         total_duration = sum(r["end"] - r["start"] for r in group)
         print(f"  cluster {cluster}: {len(group)} segment(s), "
               f"~{total_duration:.1f}s, species: {', '.join(labels)} -> {out_path}")
         if len(os.path.abspath(out_path)) > 245:
             print(f"    Warning: full output path is {len(os.path.abspath(out_path))} chars long; "
-                  f"this may fail on Windows (260-char limit). Consider --max-species-name-length "
-                  f"with a smaller value, or a shorter --out-dir.", file=sys.stderr)
+                  f"this may fail on Windows (260-char limit). Consider MAX_SPECIES_NAME_LENGTH "
+                  f"with a smaller value, or a shorter OUT_DIR.", file=sys.stderr)
 
         with wave.open(out_path, "wb") as out_wf:
             out_wf.setnchannels(nchannels)
@@ -270,4 +243,22 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    ROOT_PATH = Path(r"C:\temp\CHIPBOT_DATA_ROOT")
+    RUN_NAME = "aw_chipbot_01_2026-07-17_20_06_24_39.875578_-86.283721"
+    ANALYSIS_TIMESTAMP = "20260718_130151"
+
+    run_folder_name = f"{RUN_NAME}_{ANALYSIS_TIMESTAMP}"
+
+    output_base = ROOT_PATH / "output" / run_folder_name
+
+    CLUSTERS_CSV = output_base / f"acoustic_clusters_{run_folder_name}.csv"
+    AUDIO_DIR = ROOT_PATH / "input" / "processed" / RUN_NAME
+    OUT_DIR = output_base / "species"
+
+    MIN_CONFIDENCE = .70
+    GAP_MS = 0.0
+    FILE_PREFIX = "cluster_"
+    MAX_SPECIES_NAME_LENGTH = 120
+
+    run(csv_in=CLUSTERS_CSV, audio_dir=AUDIO_DIR, out_dir=OUT_DIR, min_confidence=MIN_CONFIDENCE,
+        gap_ms=GAP_MS, file_prefix=FILE_PREFIX, max_species_name_length=MAX_SPECIES_NAME_LENGTH)
