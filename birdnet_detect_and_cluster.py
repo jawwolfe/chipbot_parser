@@ -2,12 +2,15 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from datetime import datetime
+import natsort
 import tensorflow as tf
 # Clustering and reduction
 import umap
+from keras.src.utils import audio_dataset_utils
 from sklearn.cluster import HDBSCAN
 from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
+import shutil
 
 def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.40):
     """
@@ -117,10 +120,11 @@ def extract_embeddings_and_detect(file_path, analyzer, min_conf=0.40):
     return detections, np.array(valid_embeddings), chunks_metadata
 
 
-def run_pipeline(audio_dir, output_dir, species_list_path=None):
+def run_pipeline(audio_dir, output_dir, use_path, species_list_path=None):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
-
+    if use_path:
+        audio_dir = audio_dir / Path("processed") / Path(use_path)
     # GPU check
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
@@ -140,13 +144,17 @@ def run_pipeline(audio_dir, output_dir, species_list_path=None):
         print(f"No matching audio files found.")
         return
 
+    audio_files = natsort.natsorted(audio_files, key=lambda x: str(x))
+    first_file_name = audio_files[0].stem
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    results_txt_path = output_path / f"detection_results_{timestamp}.txt"
+    output_path_results = Path(output_path / f"{first_file_name}_{timestamp}")
+    output_path_results.mkdir(parents=True, exist_ok=True)
+    detection_file_path = output_path_results / f"detection_results_{first_file_name}_{timestamp}.txt"
 
     all_embeddings = []
     all_metadata = []
 
-    with open(results_txt_path, "w", encoding="utf-8") as f_out:
+    with open(detection_file_path, "w", encoding="utf-8") as f_out:
         for index, file_path in enumerate(audio_files, 1):
             print(f"[{index}/{len(audio_files)}] Processing: {file_path.name}...")
             f_out.write(f"=== File: {file_path.name} ===\n")
@@ -225,9 +233,9 @@ def run_pipeline(audio_dir, output_dir, species_list_path=None):
             df['umap_y'] = X_2d[:, 1]
             df['cluster'] = cluster_labels
 
-        csv_path = output_path / f"acoustic_clusters_{timestamp}.csv"
-        df.to_csv(csv_path, index=False)
-        print(f"Clustering complete! Detailed data saved to: {csv_path}")
+        acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{timestamp}.csv"
+        df.to_csv(acoustic_results_path, index=False)
+        print(f"Clustering complete! Detailed data saved to: {acoustic_results_path}")
 
         unidentified_clusters = df[(df['birdnet_label'] == "Unidentified/Ambient") & (df['cluster'] != -1)]
         if not unidentified_clusters.empty:
@@ -236,11 +244,24 @@ def run_pipeline(audio_dir, output_dir, species_list_path=None):
         else:
             print("\nNo distinct clusters of unidentified audio found.")
 
+    if not use_path:
+        archive_dir_path = (audio_dir / Path("\\processed")) / f"{first_file_name}"
+        archive_dir_path.mkdir(parents=True, exist_ok=True)
+        for file_path in audio_files:
+            try:
+                # Construct destination path: target_folder / filename.wav
+                destination = archive_dir_path / file_path.name
+                shutil.move(str(file_path), str(destination))
+                print(f"Moved: {file_path.name} -> {archive_dir_path.name}/")
+            except Exception as e:
+                print(f"Failed to move {file_path.name}: {e}")
+
 
 if __name__ == "__main__":
-    AUDIO_DIRECTORY = "data/files"
-    OUTPUT_DIRECTORY = "data/results"
-    SPECIES_LIST = "data/species/philippines.txt"
+    USE_PATH = "aw_chipbot_01_2026-07-17_20_06_24_39.875578_-86.283721"
+    AUDIO_DIRECTORY = "C:\\temp\\CHIPBOT_DATA_ROOT\\input"
+    OUTPUT_DIRECTORY = "C:\\temp\\CHIPBOT_DATA_ROOT\\output"
+    SPECIES_LIST = "C:\\temp\\CHIPBOT_DATA_ROOT\\species\\midwest.txt"
 
     run_pipeline(audio_dir=AUDIO_DIRECTORY, output_dir=OUTPUT_DIRECTORY,
-                 species_list_path=SPECIES_LIST)
+                 species_list_path=SPECIES_LIST, use_path=USE_PATH)
