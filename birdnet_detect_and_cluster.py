@@ -116,18 +116,20 @@ def extract_embeddings_and_detect(file_path, analyzer, min_conf):
         })
 
     # Filter out any None values from the final array to prevent stacking errors downstream
-    valid_embeddings = [e for e in cleaned_embeddings if e is not None and e.shape[0] != 1024]
-    # Note sur why this was changed leaving in a comment to revert
-    #valid_embeddings = [e for e in cleaned_embeddings if e is not None and e.shape[0] == 1024]
+    valid_embeddings = [e for e in cleaned_embeddings if e is not None and e.shape[0] == 1024]
 
     return detections, np.array(valid_embeddings), chunks_metadata
 
 
 def run_pipeline(audio_dir, output_dir, use_path, min_conf, species_list_path=None):
+    # FORCE audio_dir to be a Path object immediately so the / operator always works safely
+    audio_dir = Path(audio_dir)
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
+
     if use_path:
-        audio_dir = audio_dir / Path("processed") / Path(use_path)
+        audio_dir = audio_dir / "processed" / use_path
+
     # GPU check
     gpus = tf.config.list_physical_devices('GPU')
     if gpus:
@@ -140,6 +142,7 @@ def run_pipeline(audio_dir, output_dir, use_path, min_conf, species_list_path=No
     analyzer = Analyzer(custom_species_list_path=species_list_path)
 
     audio_extensions = {".wav"}
+    # This line can stay or go now, but keeping it won't hurt
     audio_dir_path = Path(audio_dir)
 
     audio_files = [f for f in audio_dir_path.iterdir() if f.suffix.lower() in audio_extensions]
@@ -163,7 +166,6 @@ def run_pipeline(audio_dir, output_dir, use_path, min_conf, species_list_path=No
             f_out.write(f"=== File: {file_path.name} ===\n")
 
             try:
-                # Pass min_conf through to the detection function
                 detections, embeddings, metadata = extract_embeddings_and_detect(
                     file_path, analyzer, min_conf=min_conf
                 )
@@ -209,6 +211,8 @@ def run_pipeline(audio_dir, output_dir, use_path, min_conf, species_list_path=No
                 random_state=42
             )
             X_umap = cluster_reducer.fit_transform(X_normalized)
+            np.save(output_path_results / f"embeddings_8d_{first_file_name}_{timestamp}.npy", X_umap)
+            np.save(output_path_results / f"embeddings_raw_{first_file_name}_{timestamp}.npy", X_normalized)
 
             print("Clustering reduced embeddings with HDBSCAN...")
             clusterer = HDBSCAN(
@@ -235,31 +239,36 @@ def run_pipeline(audio_dir, output_dir, use_path, min_conf, species_list_path=No
             df['umap_y'] = X_2d[:, 1]
             df['cluster'] = cluster_labels
 
-        acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{timestamp}.csv"
-        df.to_csv(acoustic_results_path, index=False)
-        print(f"Clustering complete! Detailed data saved to: {acoustic_results_path}")
+            # Save the results
+            acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{timestamp}.csv"
+            df.to_csv(acoustic_results_path, index=False)
+            print(f"Clustering complete! Detailed data saved to: {acoustic_results_path}")
 
-        unidentified_clusters = df[(df['birdnet_label'] == "Unidentified/Ambient") & (df['cluster'] != -1)]
-        if not unidentified_clusters.empty:
-            print(f"\n[AHA!] Found {len(unidentified_clusters)} unidentified segments that clustered together!")
-            print(unidentified_clusters[['file', 'start_time', 'cluster']].head(10).to_string(index=False))
+            unidentified_clusters = df[(df['birdnet_label'] == "Unidentified/Ambient") & (df['cluster'] != -1)]
+            if not unidentified_clusters.empty:
+                print(f"\n[AHA!] Found {len(unidentified_clusters)} unidentified segments that clustered together!")
+                print(unidentified_clusters[['file', 'start_time', 'cluster']].head(10).to_string(index=False))
+            else:
+                print("\nNo distinct clusters of unidentified audio found.")
         else:
-            print("\nNo distinct clusters of unidentified audio found.")
+            print(
+                "\nNo valid embeddings extracted from the audio files. Skipping dimensionality reduction and clustering.")
 
     if not use_path:
-        archive_dir_path = (audio_dir / Path("\\processed")) / f"{first_file_name}"
+        # This will now safely work because audio_dir is guaranteed to be a Path object
+        archive_dir_path = audio_dir / "processed" / first_file_name
         archive_dir_path.mkdir(parents=True, exist_ok=True)
         for file_path in audio_files:
             try:
                 destination = archive_dir_path / file_path.name
                 shutil.move(str(file_path), str(destination))
-                print(f"Moved: {file_path.name} -> {archive_dir_path.name}/")
+                print(f"Moved: {file_path.name} -> processed/{first_file_name}/")
             except Exception as e:
                 print(f"Failed to move {file_path.name}: {e}")
 
 
 if __name__ == "__main__":
-    USE_PATH = "aw_chipbot_01_2026-07-17_20_06_24_39.875578_-86.283721"
+    USE_PATH = ""
     AUDIO_DIRECTORY = "C:\\temp\\CHIPBOT_DATA_ROOT\\input"
     OUTPUT_DIRECTORY = "C:\\temp\\CHIPBOT_DATA_ROOT\\output"
     SPECIES_LIST = "C:\\temp\\CHIPBOT_DATA_ROOT\\species\\midwest.txt"

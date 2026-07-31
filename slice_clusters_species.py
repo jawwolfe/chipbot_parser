@@ -34,6 +34,8 @@ import sys
 import wave
 from collections import defaultdict
 from pathlib import Path
+import numpy as np
+import soundfile as sf
 
 # We lowercase everything to check matching safely
 IGNORED_LABEL = "unidentified/ambient"
@@ -309,8 +311,8 @@ if __name__ == "__main__":
     OUT_DIR_SPECIES = output_base / "species"
     OUT_DIR_CLUSTERS = output_base / "clusters"
 
-    MIN_CONFIDENCE = .70
-    GAP_MS = 0.0
+    MIN_CONFIDENCE = .80
+    GAP_MS = 200
     FILE_PREFIX = "cluster_"
     MAX_SPECIES_NAME_LENGTH = 120
 
