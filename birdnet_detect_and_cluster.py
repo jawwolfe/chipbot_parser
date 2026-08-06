@@ -342,6 +342,7 @@ class BirdNetParser(BirdNetParserBase):
             # doing a reanalysis now of existing files
             # source path is in audio dir processed then name of file group
             source_audio_dir = Path(self.audio_path + '\\processed\\' + self.analyze_file_group)
+            run_suffix = self.analysis_run_text
         else:
             # running new file group fom external drive
             valid_extensions = {".wav", ".txt"}
@@ -353,6 +354,7 @@ class BirdNetParser(BirdNetParserBase):
                     else:
                         item.unlink()
             source_audio_dir = Path(self.audio_path)
+            run_suffix = 'initial'
 
         audio_extensions = {".wav"}
         audio_dir_path = Path(source_audio_dir)
@@ -364,9 +366,9 @@ class BirdNetParser(BirdNetParserBase):
         audio_files = natsort.natsorted(audio_files, key=lambda x: str(x))
         first_file_name = audio_files[0].stem
         analysis_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path_results = Path(Path(self.output_path) / f"{first_file_name}_{analysis_timestamp}")
+        output_path_results = Path(Path(self.output_path) / f"{first_file_name}_{analysis_timestamp}_{run_suffix}")
         output_path_results.mkdir(parents=True, exist_ok=True)
-        detection_file_path = output_path_results / f"detection_results_{first_file_name}_{analysis_timestamp}.txt"
+        detection_file_path = output_path_results / f"detection_results_{first_file_name}_{analysis_timestamp}_{run_suffix}.txt"
 
         all_embeddings = []
         all_metadata = []
@@ -414,31 +416,31 @@ class BirdNetParser(BirdNetParserBase):
                 print("Reducing embeddings to 10-D with UMAP for clustering...")
                 cluster_reducer = umap.UMAP(
                     n_neighbors=self.umap.n_neighbors,
-                    min_dist=self.umap.min_dist,
+                    min_dist=self.umap.min_distance,
                     n_components=self.umap.n_components,
                     metric=self.umap.metric,
                     random_state=self.umap.random_state,
                 )
                 X_umap = cluster_reducer.fit_transform(X_normalized)
-                np.save(output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}.npy", X_umap)
-                np.save(output_path_results / f"embeddings_raw_{first_file_name}_{analysis_timestamp}.npy", X_normalized)
+                np.save(output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy", X_umap)
+                np.save(output_path_results / f"embeddings_raw_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy", X_normalized)
 
                 print("Clustering reduced embeddings with HDBSCAN...")
                 clusterer = HDBSCAN(
                     min_cluster_size=self.hdbscan_clusters.min_cluster_size,
                     min_samples=self.hdbscan_clusters.min_samples,
-                    metric=self.hdbscan_clusters.metric,
+                    metric=self.hdbscan_clusters.cluster_metric,
                 )
                 cluster_labels = clusterer.fit_predict(X_umap)
 
                 # 3. Separate UMAP run, purely for 2D visualization
                 print("Projecting embeddings to 2D with UMAP for visualization...")
                 viz_reducer = umap.UMAP(
-                    n_neighbors=self.umap.n_neighbors_sec,
-                    min_dist=self.umap.min_dist_sec,
-                    n_components=self.umap.n_components_sec,
-                    metric=self.umap.metric_sec,
-                    random_state=self.umap.random_state_sec,
+                    n_neighbors=self.umap_second.n_neighbors,
+                    min_dist=self.umap_second.min_distance,
+                    n_components=self.umap_second.n_components,
+                    metric=self.umap_second.metric,
+                    random_state=self.umap_second.random_state,
                 )
                 X_2d = viz_reducer.fit_transform(X_normalized)
 
@@ -449,7 +451,7 @@ class BirdNetParser(BirdNetParserBase):
                 df['cluster'] = cluster_labels
 
                 # Save the results
-                acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{analysis_timestamp}.csv"
+                acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{analysis_timestamp}_{run_suffix}.csv"
                 df.to_csv(acoustic_results_path, index=False)
                 print(f"Clustering complete! Detailed data saved to: {acoustic_results_path}")
 
@@ -476,10 +478,11 @@ class BirdNetParser(BirdNetParserBase):
                 # move the log files
                 for item in source_audio_dir.glob("*.txt"):
                     shutil.move(item, archive_dir_path)
-
+            else:
+                archive_dir_path = source_audio_dir
 
         # Now extract clusters and species
-        run_folder_name = f"{first_file_name}_{analysis_timestamp}"
+        run_folder_name = f"{first_file_name}_{analysis_timestamp}_{run_suffix}"
         output_base = output_dir / run_folder_name
         audio_archive = source_audio_dir / "processed" / first_file_name
         cluster_csv = output_base / f"acoustic_clusters_{run_folder_name}.csv"
