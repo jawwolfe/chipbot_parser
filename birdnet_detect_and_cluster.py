@@ -409,11 +409,11 @@ class BirdNetParser(BirdNetParserBase):
                 # 2. Reduce to a moderate-dimensional space FIRST, then cluster on that.
                 print("Reducing embeddings to 10-D with UMAP for clustering...")
                 cluster_reducer = umap.UMAP(
-                    n_neighbors=15,
-                    min_dist=0.0,
-                    n_components=8,
-                    metric='cosine',
-                    random_state=42
+                    n_neighbors=self.umap.n_neighbors,
+                    min_dist=self.umap.min_dist,
+                    n_components=self.umap.n_components,
+                    metric=self.umap.metric,
+                    random_state=self.umap.random_state,
                 )
                 X_umap = cluster_reducer.fit_transform(X_normalized)
                 np.save(output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}.npy", X_umap)
@@ -421,20 +421,20 @@ class BirdNetParser(BirdNetParserBase):
 
                 print("Clustering reduced embeddings with HDBSCAN...")
                 clusterer = HDBSCAN(
-                    min_cluster_size=4,
-                    min_samples=3,
-                    metric='euclidean'
+                    min_cluster_size=self.hdbscan_clusters.min_cluster_size,
+                    min_samples=self.hdbscan_clusters.min_samples,
+                    metric=self.hdbscan_clusters.metric,
                 )
                 cluster_labels = clusterer.fit_predict(X_umap)
 
                 # 3. Separate UMAP run, purely for 2D visualization
                 print("Projecting embeddings to 2D with UMAP for visualization...")
                 viz_reducer = umap.UMAP(
-                    n_neighbors=15,
-                    min_dist=0.0,
-                    n_components=2,
-                    metric='cosine',
-                    random_state=42
+                    n_neighbors=self.umap.n_neighbors_sec,
+                    min_dist=self.umap.min_dist_sec,
+                    n_components=self.umap.n_components_sec,
+                    metric=self.umap.metric_sec,
+                    random_state=self.umap.random_state_sec,
                 )
                 X_2d = viz_reducer.fit_transform(X_normalized)
 
