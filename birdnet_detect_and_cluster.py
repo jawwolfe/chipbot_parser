@@ -10,22 +10,205 @@ from keras.src.utils import audio_dataset_utils
 from sklearn.cluster import HDBSCAN
 from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
-import shutil
+import shutil, os, csv, sys, wave, re
+from collections import defaultdict
 
+FILE_PREFIX = "cluster_"
+MAX_SPECIES_NAME_LENGTH = 120
+IGNORED_LABEL = "unidentified/ambient"
 
 class BirdNetParserBase:
     def __init__(self, logger):
         self.logger = logger
 
+class WavCache:
+    """Keeps source WAV files open (read-only) and caches their audio params."""
+
+    def __init__(self, audio_dir):
+        self.audio_dir = audio_dir
+        self._handles = {}
+        self._params = {}
+
+    def get(self, filename):
+        if filename not in self._handles:
+            path = os.path.join(self.audio_dir, filename)
+            if not os.path.isfile(path):
+                sys.exit(f"Source WAV not found: {path}")
+            wf = wave.open(path, "rb")
+            self._handles[filename] = wf
+            self._params[filename] = wf.getparams()
+        return self._handles[filename]
+
+    def params(self, filename):
+        self.get(filename)
+        return self._params[filename]
+
+    def close_all(self):
+        for wf in self._handles.values():
+            wf.close()
 
 class BirdNetParser(BirdNetParserBase):
-    def __init__(self, logger, external_drive, audio_path, output_path, min_confidence, species_list):
+    def __init__(self, logger, external_drive, audio_path, output_path, min_confidence_input, min_confidence_output,
+                 species_list, gap_ms):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
-        self.min_confidence = min_confidence
+        self.min_confidence_input = min_confidence_input
+        self.min_confidence_output = min_confidence_output
         self.species_list_path = species_list
+        self.gap_ms = gap_ms
         BirdNetParserBase.__init__(self, logger=logger)
+
+    def read_rows(self, csv_path):
+        rows = []
+        skipped_blank = 0
+        skipped_low_confidence = 0
+
+        with open(csv_path, newline="") as f:
+            # Custom dict reader wrapper to handle case-insensitive headers just in case
+            raw_reader = csv.DictReader(f)
+            if not raw_reader.fieldnames:
+                sys.exit("CSV appears to be empty or missing a header row.")
+
+            # Map headers to lowercase to prevent "birdnet_label" vs "BirdNet_label" mismatches
+            header_map = {name.lower().strip(): name for name in raw_reader.fieldnames}
+
+            required = {"file", "start_time", "end_time", "cluster", "birdnet_label"}
+            missing = required - set(header_map.keys())
+            if missing:
+                sys.exit(f"CSV is missing required columns: {sorted(missing)}")
+
+            for i, raw_row in enumerate(raw_reader, start=2):  # header is line 1
+                # Reconstruct row using lowercase keys for safe access
+                row = {k.lower().strip(): v for k, v in raw_row.items() if k}
+
+                label = (row.get("birdnet_label") or "").strip()
+                if not label:
+                    skipped_blank += 1
+                    continue
+
+                try:
+                    start = float(row["start_time"])
+                    end = float(row["end_time"])
+                    cluster = row["cluster"].strip()
+                    # Safely get confidence if it exists
+                    conf_val = row.get("confidence")
+                    conf = float(conf_val) if conf_val not in (None, "") else None
+                except ValueError as e:
+                    sys.exit(f"CSV row {i}: could not parse numeric field ({e})")
+
+                if end <= start:
+                    print(f"Warning: row {i} has end_time <= start_time, skipping", file=sys.stderr)
+                    continue
+
+                # Determine if this row belongs to the ambient/unidentified category
+                is_ambient = label.lower() == IGNORED_LABEL
+
+                # CRITICAL FIX: Only apply min_confidence to IDENTIFIED species.
+                # Ambient/Unidentified clips often have 0.0 or low confidence scores.
+                if not is_ambient and self.min_confidence_output is not None and conf is not None and conf < self.min_confidence_output:
+                    skipped_low_confidence += 1
+                    continue
+
+                rows.append({
+                    "file": row["file"].strip(),
+                    "start": start,
+                    "end": end,
+                    "cluster": cluster,
+                    "confidence": conf,
+                    "label": label,  # Keeps original casing for filename
+                    "is_ambient": is_ambient
+                })
+
+        print(f"Loaded {len(rows)} total valid rows.")
+        print(f"  - Skipped {skipped_blank} blank label rows.")
+        print(f"  - Skipped {skipped_low_confidence} identified species rows below {self.min_confidence_output} confidence.")
+        return rows
+
+    def sanitize_for_filename(self, label):
+        """Turn a birdnet_label into a filesystem-safe chunk for use in a filename."""
+        cleaned = label.strip()
+        if "_" in cleaned and cleaned.count("_") == 1:
+            _, _, common = cleaned.partition("_")
+            if common:
+                cleaned = common
+        cleaned = cleaned.replace("/", "-").replace(" ", "_")
+        cleaned = re.sub(r"[^A-Za-z0-9_\-]", "", cleaned)
+        cleaned = re.sub(r"_+", "_", cleaned).strip("_-")
+        return cleaned or "unknown_species"
+
+    def all_species_slug(self, group, max_length=120):
+        """Return a filename-safe chunk listing distinct species in a cluster."""
+        slugs = sorted({self.sanitize_for_filename(r["label"]) for r in group})
+        full = "+".join(slugs)
+        if len(full) <= max_length:
+            return full
+
+        kept = []
+        length = 0
+        for slug in slugs:
+            added = (1 if kept else 0) + len(slug)
+            if length + added > max_length:
+                break
+            kept.append(slug)
+            length += added
+        remaining = len(slugs) - len(kept)
+        if not kept:
+            return slugs[0][:max_length]
+        return "+".join(kept) + f"+{remaining}_more"
+
+    def extract_segment_bytes(wf, params, start_time, end_time):
+        framerate = params.framerate
+        n_frames_total = params.nframes
+        sampwidth = params.sampwidth
+        nchannels = params.nchannels
+
+        start_frame = max(0, int(round(start_time * framerate)))
+        end_frame = min(n_frames_total, int(round(end_time * framerate)))
+        if start_frame >= end_frame:
+            return b""
+
+        wf.setpos(start_frame)
+        n_frames = end_frame - start_frame
+        data = wf.readframes(n_frames)
+        expected_bytes = n_frames * sampwidth * nchannels
+        if len(data) < expected_bytes:
+            print(f"Warning: requested {expected_bytes} bytes but only got {len(data)} "
+                  f"(segment near end of file, truncated)", file=sys.stderr)
+        return data
+
+    def write_cluster_wavs(self, by_cluster, cache, destination_dir, file_prefix, max_species_name_length,
+                           audio_format_params,
+                           gap_bytes):
+        """Helper to process a dictionary of clusters and write out combined WAV files."""
+        nchannels, sampwidth, framerate = audio_format_params
+
+        for cluster, group in sorted(by_cluster.items(), key=lambda kv: kv[0]):
+            labels = sorted({r["label"] for r in group})
+            species_slug = self.all_species_slug(group, max_length=max_species_name_length)
+            out_path = os.path.join(destination_dir, f"{file_prefix}{cluster}_{species_slug}.wav")
+            total_duration = sum(r["end"] - r["start"] for r in group)
+
+            print(f"  cluster {cluster}: {len(group)} segment(s), "
+                  f"~{total_duration:.1f}s, labels: {', '.join(labels)} -> {out_path}")
+
+            if len(os.path.abspath(out_path)) > 245:
+                print(f"    Warning: full output path is {len(os.path.abspath(out_path))} chars long; "
+                      f"this may fail on Windows (260-char limit).", file=sys.stderr)
+
+            with wave.open(out_path, "wb") as out_wf:
+                out_wf.setnchannels(nchannels)
+                out_wf.setsampwidth(sampwidth)
+                out_wf.setframerate(framerate)
+
+                for idx, row in enumerate(group):
+                    wf = cache.get(row["file"])
+                    params = cache.params(row["file"])
+                    data = self.extract_segment_bytes(wf, params, row["start"], row["end"])
+                    out_wf.writeframes(data)
+                    if gap_bytes and idx != len(group) - 1:
+                        out_wf.writeframes(gap_bytes)
+
 
     def extract_embeddings_and_detect(self, file_path, analyzer):
         """
@@ -33,7 +216,7 @@ class BirdNetParser(BirdNetParserBase):
         then dynamically builds a patched Analyzer to extract 1024-D embeddings.
         """
         # 1. Standard detection using your custom-list analyzer
-        detection_recording = Recording(analyzer=analyzer, path=str(file_path), min_conf=self.min_confidence)
+        detection_recording = Recording(analyzer=analyzer, path=str(file_path), min_conf=self.min_confidence_input)
         detection_recording.analyze()
         detections = detection_recording.detections
 
@@ -173,14 +356,13 @@ class BirdNetParser(BirdNetParserBase):
 
         audio_files = natsort.natsorted(audio_files, key=lambda x: str(x))
         first_file_name = audio_files[0].stem
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path_results = Path(Path(self.output_path) / f"{first_file_name}_{timestamp}")
+        analysis_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path_results = Path(Path(self.output_path) / f"{first_file_name}_{analysis_timestamp}")
         output_path_results.mkdir(parents=True, exist_ok=True)
-        detection_file_path = output_path_results / f"detection_results_{first_file_name}_{timestamp}.txt"
+        detection_file_path = output_path_results / f"detection_results_{first_file_name}_{analysis_timestamp}.txt"
 
         all_embeddings = []
         all_metadata = []
-
         with open(detection_file_path, "w", encoding="utf-8") as f_out:
             for index, file_path in enumerate(audio_files, 1):
                 print(f"[{index}/{len(audio_files)}] Processing: {file_path.name}...")
@@ -231,8 +413,8 @@ class BirdNetParser(BirdNetParserBase):
                     random_state=42
                 )
                 X_umap = cluster_reducer.fit_transform(X_normalized)
-                np.save(output_path_results / f"embeddings_8d_{first_file_name}_{timestamp}.npy", X_umap)
-                np.save(output_path_results / f"embeddings_raw_{first_file_name}_{timestamp}.npy", X_normalized)
+                np.save(output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}.npy", X_umap)
+                np.save(output_path_results / f"embeddings_raw_{first_file_name}_{analysis_timestamp}.npy", X_normalized)
 
                 print("Clustering reduced embeddings with HDBSCAN...")
                 clusterer = HDBSCAN(
@@ -260,7 +442,7 @@ class BirdNetParser(BirdNetParserBase):
                 df['cluster'] = cluster_labels
 
                 # Save the results
-                acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{timestamp}.csv"
+                acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{analysis_timestamp}.csv"
                 df.to_csv(acoustic_results_path, index=False)
                 print(f"Clustering complete! Detailed data saved to: {acoustic_results_path}")
 
@@ -286,3 +468,82 @@ class BirdNetParser(BirdNetParserBase):
             # move the log files
             for item in audio_dir.glob("*.txt"):
                 shutil.move(item, archive_dir_path)
+
+        # Now extract clusters and species
+        run_folder_name = f"{first_file_name}_{analysis_timestamp}"
+        output_base = output_dir / run_folder_name
+        audio_archive = audio_dir / "processed" / first_file_name
+        cluster_csv = output_base / f"acoustic_clusters_{run_folder_name}.csv"
+        out_dir_species = output_base / "species"
+        out_dir_clusters = output_base / "clusters"
+        os.makedirs(out_dir_species, exist_ok=True)
+        os.makedirs(out_dir_clusters, exist_ok=True)
+
+        rows = self.read_rows(csv_path=cluster_csv)
+        if not rows:
+            sys.exit("No matching rows found in CSV after filtering.")
+
+        # Split rows into species vs ambient datasets
+        species_rows = [r for r in rows if not r["is_ambient"]]
+        ambient_rows = [r for r in rows if r["is_ambient"]]
+
+        # Group species rows by cluster
+        by_cluster_species = defaultdict(list)
+        for row in species_rows:
+            by_cluster_species[row["cluster"]].append(row)
+        for cluster in by_cluster_species:
+            by_cluster_species[cluster].sort(key=lambda r: (r["file"], r["start"]))
+
+        # Group ambient rows by cluster
+        by_cluster_ambient = defaultdict(list)
+        for row in ambient_rows:
+            by_cluster_ambient[row["cluster"]].append(row)
+        for cluster in by_cluster_ambient:
+            by_cluster_ambient[cluster].sort(key=lambda r: (r["file"], r["start"]))
+
+        cache = WavCache(audio_dir)
+
+        # Validate all referenced files share the same audio format up front
+        reference_params = None
+        reference_file = None
+        all_files = sorted({row["file"] for row in rows})
+        for fname in all_files:
+            params = cache.params(fname)
+            if reference_params is None:
+                reference_params = params
+                reference_file = fname
+            else:
+                if (params.framerate, params.sampwidth, params.nchannels) != \
+                        (reference_params.framerate, reference_params.sampwidth, reference_params.nchannels):
+                    sys.exit(
+                        f"Format mismatch: '{fname}' differs from '{reference_file}' format."
+                    )
+
+        framerate = reference_params.framerate
+        sampwidth = reference_params.sampwidth
+        nchannels = reference_params.nchannels
+        silence_frame = b"\x00" * (sampwidth * nchannels)
+        gap_frames = int(round((self.gap_ms / 1000.0) * framerate)) if self.gap_ms > 0 else 0
+        gap_bytes = silence_frame * gap_frames
+        audio_format_params = (nchannels, sampwidth, framerate)
+
+        # Processing Identified Species
+        if by_cluster_species:
+            print(
+                f"\nProcessing {len(species_rows)} identified-species segments across {len(by_cluster_species)} cluster(s)...")
+            self.write_cluster_wavs(by_cluster_species, cache, out_dir_species, FILE_PREFIX, MAX_SPECIES_NAME_LENGTH,
+                               audio_format_params, gap_bytes)
+        else:
+            print("\nNo identified-species segments found to export.")
+
+        # Processing Unidentified / Ambient
+        if by_cluster_ambient:
+            print(
+                f"\nProcessing {len(ambient_rows)} unidentified/ambient segments across {len(by_cluster_ambient)} cluster(s)...")
+            self.write_cluster_wavs(by_cluster_ambient, cache, out_dir_clusters, FILE_PREFIX, MAX_SPECIES_NAME_LENGTH,
+                               audio_format_params, gap_bytes)
+        else:
+            print("\nNo unidentified/ambient segments found to export.")
+
+        cache.close_all()
+        print("\nDone.")
