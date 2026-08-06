@@ -49,7 +49,7 @@ class WavCache:
 
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, output_path, min_confidence_input, min_confidence_output,
-                 species_list, gap_ms):
+                 species_list, gap_ms, hdbscan_clusters, umap, umap_second):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
@@ -57,6 +57,9 @@ class BirdNetParser(BirdNetParserBase):
         self.min_confidence_output = min_confidence_output
         self.species_list_path = species_list
         self.gap_ms = gap_ms
+        self.umap = umap
+        self.umap_second = umap_second
+        self.hdbscan_clusters = hdbscan_clusters
         BirdNetParserBase.__init__(self, logger=logger)
 
     def read_rows(self, csv_path):
