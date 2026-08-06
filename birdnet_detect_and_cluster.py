@@ -157,7 +157,7 @@ class BirdNetParser(BirdNetParserBase):
             return slugs[0][:max_length]
         return "+".join(kept) + f"+{remaining}_more"
 
-    def extract_segment_bytes(wf, params, start_time, end_time):
+    def extract_segment_bytes(self, wf, params, start_time, end_time):
         framerate = params.framerate
         n_frames_total = params.nframes
         sampwidth = params.sampwidth
@@ -501,7 +501,7 @@ class BirdNetParser(BirdNetParserBase):
         for cluster in by_cluster_ambient:
             by_cluster_ambient[cluster].sort(key=lambda r: (r["file"], r["start"]))
 
-        cache = WavCache(audio_dir)
+        cache = WavCache(archive_dir_path)
 
         # Validate all referenced files share the same audio format up front
         reference_params = None
