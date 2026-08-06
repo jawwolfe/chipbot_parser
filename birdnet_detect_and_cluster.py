@@ -49,7 +49,7 @@ class WavCache:
 
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, output_path, min_confidence_input, min_confidence_output,
-                 species_list, gap_ms, hdbscan_clusters, umap, umap_second):
+                 species_list, gap_ms, hdbscan_clusters, umap, umap_second, analysis_run_text, analyze_file_group):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
@@ -60,6 +60,8 @@ class BirdNetParser(BirdNetParserBase):
         self.umap = umap
         self.umap_second = umap_second
         self.hdbscan_clusters = hdbscan_clusters
+        self.analysis_run_text = analysis_run_text
+        self.analyze_file_group = analyze_file_group
         BirdNetParserBase.__init__(self, logger=logger)
 
     def read_rows(self, csv_path):
@@ -322,20 +324,8 @@ class BirdNetParser(BirdNetParserBase):
 
 
     def run_pipeline(self):
-        audio_dir = Path(self.audio_path)
         output_dir = Path(self.output_path)
-        output_dir.mkdir(parents=True, exist_ok=True)
         external_dir = Path(self.external_drive + '://')
-
-        valid_extensions = {".wav", ".txt"}
-        for item in external_dir.iterdir():
-            # Only process non-recursive files matching valid extensions
-            if item.is_file() and item.suffix.lower() in valid_extensions:
-                if item.stat().st_size > 0:
-                    shutil.move(item, audio_dir / item.name)
-                else:
-                    item.unlink()
-
 
         # GPU check
         gpus = tf.config.list_physical_devices('GPU')
@@ -348,10 +338,24 @@ class BirdNetParser(BirdNetParserBase):
         print("Initializing customized species list analyzer...")
         analyzer = Analyzer(custom_species_list_path=self.species_list_path)
 
-        audio_extensions = {".wav"}
-        # This line can stay or go now, but keeping it won't hurt
-        audio_dir_path = Path(audio_dir)
+        if self.analyze_file_group:
+            # doing a reanalysis now of existing files
+            # source path is in audio dir processed then name of file group
+            source_audio_dir = Path(self.audio_path + '\\processed\\' + self.analyze_file_group)
+        else:
+            # running new file group fom external drive
+            valid_extensions = {".wav", ".txt"}
+            for item in external_dir.iterdir():
+                # Only process non-recursive files matching valid extensions
+                if item.is_file() and item.suffix.lower() in valid_extensions:
+                    if item.stat().st_size > 0:
+                        shutil.move(item, Path(self.audio_path) / item.name)
+                    else:
+                        item.unlink()
+            source_audio_dir = Path(self.audio_path)
 
+        audio_extensions = {".wav"}
+        audio_dir_path = Path(source_audio_dir)
         audio_files = [f for f in audio_dir_path.iterdir() if f.suffix.lower() in audio_extensions]
         if not audio_files:
             print(f"No matching audio files found.")
@@ -459,23 +463,25 @@ class BirdNetParser(BirdNetParserBase):
                 print(
                     "\nNo valid embeddings extracted from the audio files. Skipping dimensionality reduction and clustering.")
 
-            archive_dir_path = audio_dir / "processed" / first_file_name
-            archive_dir_path.mkdir(parents=True, exist_ok=True)
-            for file_path in audio_files:
-                try:
-                    destination = archive_dir_path / file_path.name
-                    shutil.move(str(file_path), str(destination))
-                    print(f"Moved: {file_path.name} -> processed/{first_file_name}/")
-                except Exception as e:
-                    print(f"Failed to move {file_path.name}: {e}")
-            # move the log files
-            for item in audio_dir.glob("*.txt"):
-                shutil.move(item, archive_dir_path)
+            if not self.analyze_file_group:
+                archive_dir_path = source_audio_dir / "processed" / first_file_name
+                archive_dir_path.mkdir(parents=True, exist_ok=True)
+                for file_path in audio_files:
+                    try:
+                        destination = archive_dir_path / file_path.name
+                        shutil.move(str(file_path), str(destination))
+                        print(f"Moved: {file_path.name} -> processed/{first_file_name}/")
+                    except Exception as e:
+                        print(f"Failed to move {file_path.name}: {e}")
+                # move the log files
+                for item in source_audio_dir.glob("*.txt"):
+                    shutil.move(item, archive_dir_path)
+
 
         # Now extract clusters and species
         run_folder_name = f"{first_file_name}_{analysis_timestamp}"
         output_base = output_dir / run_folder_name
-        audio_archive = audio_dir / "processed" / first_file_name
+        audio_archive = source_audio_dir / "processed" / first_file_name
         cluster_csv = output_base / f"acoustic_clusters_{run_folder_name}.csv"
         out_dir_species = output_base / "species"
         out_dir_clusters = output_base / "clusters"

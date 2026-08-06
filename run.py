@@ -23,6 +23,7 @@ N_COMPONENTS_SEC = config.N_COMPONENTS_SEC
 NMAP_METRIC_SEC = config.NMAP_METRIC_SEC
 RANDOM_STATE_SEC = config.RANDOM_STATE_SEC
 ANALYSIS_RUN_TEXT = config.ANALYSIS_RUN_TEXT
+ANALYZE_FILE_GROUP = config.ANALYZE_FILE_GROUP
 
 
 def initialize_umap():
@@ -48,6 +49,7 @@ parse = BirdNetParser(logger='', audio_path=AUDIO_PATH, output_path=OUTPUT_PATH,
                       min_confidence_input=MIN_CONFIDENCE_INPUT, species_list=SPECIES_LIST,
                       external_drive=EXTERNAL_DRIVE, min_confidence_output=MIN_CONFIDENCE_OUTPUT,
                       gap_ms=GAP_MS, umap=initialize_umap(), umap_second=initialize_umap_sec(),
-                      hdbscan_clusters=initialize_hdbscan())
+                      hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
+                      analyze_file_group=ANALYZE_FILE_GROUP)
 
 parse.run_pipeline()
