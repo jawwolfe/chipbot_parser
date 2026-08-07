@@ -406,49 +406,73 @@ class BirdNetParser(BirdNetParserBase):
 
             if all_embeddings:
                 print("\n--- Running Dimensionality Reduction & Clustering ---")
-                X = np.vstack(all_embeddings)
+                X_all = np.vstack(all_embeddings)
+                df_all = pd.DataFrame(all_metadata)
 
-                # 1. Normalize embeddings (essential for cosine distance)
-                norms = np.linalg.norm(X, axis=1, keepdims=True)
-                X_normalized = np.where(norms == 0, X, X / norms)
+                # Only cluster chunks BirdNET did NOT confidently identify.
+                identified_mask = (df_all['birdnet_label'] == "Unidentified/Ambient").to_numpy() == False
+                X_identified = X_all[identified_mask]
+                X_unidentified = X_all[~identified_mask]
+                df_identified = df_all[identified_mask].copy()
+                df_unidentified = df_all[~identified_mask].copy()
 
-                # 2. Reduce to a moderate-dimensional space FIRST, then cluster on that.
-                print("Reducing embeddings to 10-D with UMAP for clustering...")
-                cluster_reducer = umap.UMAP(
-                    n_neighbors=self.umap.n_neighbors,
-                    min_dist=self.umap.min_distance,
-                    n_components=self.umap.n_components,
-                    metric=self.umap.metric,
-                    random_state=self.umap.random_state,
-                )
-                X_umap = cluster_reducer.fit_transform(X_normalized)
-                np.save(output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy", X_umap)
-                np.save(output_path_results / f"embeddings_raw_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy", X_normalized)
+                print(f"{len(df_identified)} chunk(s) already identified by BirdNET -> skipping cluster analysis.")
+                print(f"{len(df_unidentified)} chunk(s) unidentified -> running cluster analysis on these only.")
 
-                print("Clustering reduced embeddings with HDBSCAN...")
-                clusterer = HDBSCAN(
-                    min_cluster_size=self.hdbscan_clusters.min_cluster_size,
-                    min_samples=self.hdbscan_clusters.min_samples,
-                    metric=self.hdbscan_clusters.cluster_metric,
-                )
-                cluster_labels = clusterer.fit_predict(X_umap)
+                if len(X_unidentified) > 0:
+                    # 1. Normalize embeddings (essential for cosine distance)
+                    norms = np.linalg.norm(X_unidentified, axis=1, keepdims=True)
+                    X_normalized = np.where(norms == 0, X_unidentified, X_unidentified / norms)
 
-                # 3. Separate UMAP run, purely for 2D visualization
-                print("Projecting embeddings to 2D with UMAP for visualization...")
-                viz_reducer = umap.UMAP(
-                    n_neighbors=self.umap_second.n_neighbors,
-                    min_dist=self.umap_second.min_distance,
-                    n_components=self.umap_second.n_components,
-                    metric=self.umap_second.metric,
-                    random_state=self.umap_second.random_state,
-                )
-                X_2d = viz_reducer.fit_transform(X_normalized)
+                    # 2. Reduce to a moderate-dimensional space FIRST, then cluster on that.
+                    print("Reducing embeddings to 10-D with UMAP for clustering...")
+                    cluster_reducer = umap.UMAP(
+                        n_neighbors=self.umap.n_neighbors,
+                        min_dist=self.umap.min_distance,
+                        n_components=self.umap.n_components,
+                        metric=self.umap.metric,
+                        random_state=self.umap.random_state,
+                    )
+                    X_umap = cluster_reducer.fit_transform(X_normalized)
+                    np.save(
+                        output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy",
+                        X_umap)
+                    np.save(
+                        output_path_results / f"embeddings_raw_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy",
+                        X_normalized)
 
-                # 4. Build DataFrame
-                df = pd.DataFrame(all_metadata)
-                df['umap_x'] = X_2d[:, 0]
-                df['umap_y'] = X_2d[:, 1]
-                df['cluster'] = cluster_labels
+                    print("Clustering reduced embeddings with HDBSCAN...")
+                    clusterer = HDBSCAN(
+                        min_cluster_size=self.hdbscan_clusters.min_cluster_size,
+                        min_samples=self.hdbscan_clusters.min_samples,
+                        metric=self.hdbscan_clusters.cluster_metric,
+                    )
+                    cluster_labels = clusterer.fit_predict(X_umap)
+
+                    # 3. Separate UMAP run, purely for 2D visualization
+                    print("Projecting embeddings to 2D with UMAP for visualization...")
+                    viz_reducer = umap.UMAP(
+                        n_neighbors=self.umap_second.n_neighbors,
+                        min_dist=self.umap_second.min_distance,
+                        n_components=self.umap_second.n_components,
+                        metric=self.umap_second.metric,
+                        random_state=self.umap_second.random_state,
+                    )
+                    X_2d = viz_reducer.fit_transform(X_normalized)
+
+                    df_unidentified['umap_x'] = X_2d[:, 0]
+                    df_unidentified['umap_y'] = X_2d[:, 1]
+                    df_unidentified['cluster'] = cluster_labels
+                else:
+                    print("No unidentified segments to cluster.")
+
+                # Identified rows don't need acoustic clustering — give each species its own "cluster" id.
+                if len(df_identified) > 0:
+                    df_identified['umap_x'] = np.nan
+                    df_identified['umap_y'] = np.nan
+                    df_identified['cluster'] = df_identified['birdnet_label'].apply(self.sanitize_for_filename)
+
+                df = pd.concat([df_identified, df_unidentified], ignore_index=True)
 
                 # Save the results
                 acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{analysis_timestamp}_{run_suffix}.csv"
