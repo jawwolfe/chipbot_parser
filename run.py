@@ -12,6 +12,7 @@ GAP_MS = config.GAP_MS
 MIN_CLUSTER_SIZE = config.MIN_CLUSTER_SIZE
 MIN_SAMPLES = config.MIN_SAMPLES
 CLUSTER_METRIC = config.CLUSTER_METRIC
+CLUSTER_SELECTION_EPSILON = config.CLUSTER_SELECTION_EPSILON
 N_NEIGHBORS = config.N_NEIGHBORS
 MIN_DISTANCE = config.MIN_DISTANCE
 N_COMPONENTS = config.N_COMPONENTS
@@ -41,7 +42,7 @@ def initialize_umap_sec():
 
 def initialize_hdbscan():
     hdbscan_params = HDBSCANClusters(min_samples=MIN_SAMPLES, min_cluster_size=MIN_CLUSTER_SIZE,
-                                     cluster_metric=CLUSTER_METRIC)
+                                     cluster_metric=CLUSTER_METRIC, cluster_selection_epsilon=CLUSTER_SELECTION_EPSILON)
     return hdbscan_params
 
 

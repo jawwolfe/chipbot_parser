@@ -6,7 +6,6 @@ import natsort
 import tensorflow as tf
 # Clustering and reduction
 import umap
-from keras.src.utils import audio_dataset_utils
 from sklearn.cluster import HDBSCAN
 from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
@@ -446,6 +445,7 @@ class BirdNetParser(BirdNetParserBase):
                         min_cluster_size=self.hdbscan_clusters.min_cluster_size,
                         min_samples=self.hdbscan_clusters.min_samples,
                         metric=self.hdbscan_clusters.cluster_metric,
+                        cluster_selection_epsilon=self.hdbscan_clusters.cluster_selection_epsilon,
                     )
                     cluster_labels = clusterer.fit_predict(X_umap)
 
