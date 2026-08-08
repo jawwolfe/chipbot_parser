@@ -12,6 +12,8 @@ from birdnetlib.analyzer import Analyzer
 import shutil, os, csv, sys, wave, re
 from collections import defaultdict
 
+from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
+
 FILE_PREFIX = "cluster_"
 MAX_SPECIES_NAME_LENGTH = 120
 IGNORED_LABEL = "unidentified/ambient"
@@ -447,7 +449,6 @@ class BirdNetParser(BirdNetParserBase):
                         cluster_selection_epsilon=self.hdbscan_clusters.cluster_selection_epsilon,
                     )
                     cluster_labels = clusterer.fit_predict(X_umap)
-
                     # 3. Separate UMAP run, purely for 2D visualization
                     print("Projecting embeddings to 2D with UMAP for visualization...")
                     viz_reducer = umap.UMAP(
@@ -472,6 +473,19 @@ class BirdNetParser(BirdNetParserBase):
                     df_identified['cluster'] = df_identified['birdnet_label'].apply(self.sanitize_for_filename)
 
                 df = pd.concat([df_identified, df_unidentified], ignore_index=True)
+                n_species = df.loc[df['birdnet_label'] != "Unidentified/Ambient", 'birdnet_label'].nunique()
+                n_tot_clusters = df.loc[df['cluster'] != -1, 'cluster'].nunique()  # excludes HDBSCAN noise (-1)
+                n_clusters = n_tot_clusters - n_species
+                total_audio_seconds_approx = len(all_metadata) * 3.0
+                noise_rows = df_unidentified[df_unidentified['cluster'] == -1]
+                noise_seconds = (noise_rows['end_time'] - noise_rows['start_time']).sum()
+                n_noise_chunks = len(noise_rows)
+                # Identified species (BirdNET-labeled)
+                species_seconds = (df_identified['end_time'] - df_identified['start_time']).sum()
+                n_species_chunks = len(df_identified)
+                clustered_rows = df_unidentified[df_unidentified['cluster'] != -1]
+                clustered_seconds = (clustered_rows['end_time'] - clustered_rows['start_time']).sum()
+                n_clustered_chunks = len(clustered_rows)
 
                 # Save the results
                 acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{analysis_timestamp}_{run_suffix}.csv"
@@ -580,4 +594,20 @@ class BirdNetParser(BirdNetParserBase):
             print("\nNo unidentified/ambient segments found to export.")
 
         cache.close_all()
+
+        with open(output_path_results / "summary.txt", "a") as summary:
+            summary.write('File set length: ' + str(total_audio_seconds_approx) + ' seconds of audio\n')
+            summary.write(str(n_species) + ' species in ' + str(species_seconds) + ' seconds of audio\n')
+            summary.write(str(n_clusters) + ' clusters in ' + str(clustered_seconds) + ' seconds of audio\n')
+            summary.write(str(noise_seconds) + ' seconds of background noise\n')
+            summary.write('Number of unique files: ' + str(len(by_cluster_species)) + '\n')
+            summary.write('Species Detection Min confidence: ' + str(self.min_confidence) + '\n\n')
+            summary.write('HDBSCAN\n')
+            summary.write('Min cluster size: ' + str(self.hdbscan_clusters.min_cluster_size) + '\n')
+            summary.write('Min samples: ' + str(self.hdbscan_clusters.min_samples) + '\n')
+            summary.write('Metric: ' + str(self.hdbscan_clusters.cluster_metric) + '\n')
+            summary.write('Selection Epsilon: ' + str(self.hdbscan_clusters.cluster_selection_epsilon) + '\n')
+        summary.close()
+
+
         print("\nDone.")
