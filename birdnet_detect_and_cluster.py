@@ -48,7 +48,7 @@ class WavCache:
 
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, output_path, min_confidence,
-                 species_list, gap_ms, hdbscan_clusters, umap, umap_second, analysis_run_text, analyze_file_group):
+                 species_list, gap_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
@@ -56,7 +56,7 @@ class BirdNetParser(BirdNetParserBase):
         self.species_list_path = species_list
         self.gap_ms = gap_ms
         self.umap = umap
-        self.umap_second = umap_second
+        self.umap_viz = umap_viz
         self.hdbscan_clusters = hdbscan_clusters
         self.analysis_run_text = analysis_run_text
         self.analyze_file_group = analyze_file_group
@@ -451,11 +451,11 @@ class BirdNetParser(BirdNetParserBase):
                     # 3. Separate UMAP run, purely for 2D visualization
                     print("Projecting embeddings to 2D with UMAP for visualization...")
                     viz_reducer = umap.UMAP(
-                        n_neighbors=self.umap_second.n_neighbors,
-                        min_dist=self.umap_second.min_distance,
-                        n_components=self.umap_second.n_components,
-                        metric=self.umap_second.metric,
-                        random_state=self.umap_second.random_state,
+                        n_neighbors=self.umap_viz.n_neighbors,
+                        min_dist=self.umap_viz.min_distance,
+                        n_components=self.umap_viz.n_components,
+                        metric=self.umap_viz.metric,
+                        random_state=self.umap_viz.random_state,
                     )
                     X_2d = viz_reducer.fit_transform(X_normalized)
 
