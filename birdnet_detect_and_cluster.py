@@ -47,13 +47,12 @@ class WavCache:
             wf.close()
 
 class BirdNetParser(BirdNetParserBase):
-    def __init__(self, logger, external_drive, audio_path, output_path, min_confidence_input, min_confidence_output,
+    def __init__(self, logger, external_drive, audio_path, output_path, min_confidence,
                  species_list, gap_ms, hdbscan_clusters, umap, umap_second, analysis_run_text, analyze_file_group):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
-        self.min_confidence_input = min_confidence_input
-        self.min_confidence_output = min_confidence_output
+        self.min_confidence = min_confidence
         self.species_list_path = species_list
         self.gap_ms = gap_ms
         self.umap = umap
@@ -110,7 +109,7 @@ class BirdNetParser(BirdNetParserBase):
 
                 # CRITICAL FIX: Only apply min_confidence to IDENTIFIED species.
                 # Ambient/Unidentified clips often have 0.0 or low confidence scores.
-                if not is_ambient and self.min_confidence_output is not None and conf is not None and conf < self.min_confidence_output:
+                if not is_ambient and self.min_confidence is not None and conf is not None and conf < self.min_confidence:
                     skipped_low_confidence += 1
                     continue
 
@@ -126,7 +125,7 @@ class BirdNetParser(BirdNetParserBase):
 
         print(f"Loaded {len(rows)} total valid rows.")
         print(f"  - Skipped {skipped_blank} blank label rows.")
-        print(f"  - Skipped {skipped_low_confidence} identified species rows below {self.min_confidence_output} confidence.")
+        print(f"  - Skipped {skipped_low_confidence} identified species rows below {self.min_confidence} confidence.")
         return rows
 
     def sanitize_for_filename(self, label):
@@ -220,7 +219,7 @@ class BirdNetParser(BirdNetParserBase):
         then dynamically builds a patched Analyzer to extract 1024-D embeddings.
         """
         # 1. Standard detection using your custom-list analyzer
-        detection_recording = Recording(analyzer=analyzer, path=str(file_path), min_conf=self.min_confidence_input)
+        detection_recording = Recording(analyzer=analyzer, path=str(file_path), min_conf=self.min_confidence)
         detection_recording.analyze()
         detections = detection_recording.detections
 
@@ -339,8 +338,7 @@ class BirdNetParser(BirdNetParserBase):
 
         if self.analyze_file_group:
             # doing a reanalysis now of existing files
-            # source path is in audio dir processed then name of file group
-            source_audio_dir = Path(self.audio_path + '\\processed\\' + self.analyze_file_group)
+            source_audio_dir = Path(self.audio_path + "\\" + self.analyze_file_group)
             run_suffix = self.analysis_run_text
         else:
             # running new file group fom external drive
@@ -433,13 +431,14 @@ class BirdNetParser(BirdNetParserBase):
                         random_state=self.umap.random_state,
                     )
                     X_umap = cluster_reducer.fit_transform(X_normalized)
+                    '''
                     np.save(
                         output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy",
                         X_umap)
                     np.save(
                         output_path_results / f"embeddings_raw_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy",
                         X_normalized)
-
+                    '''
                     print("Clustering reduced embeddings with HDBSCAN...")
                     clusterer = HDBSCAN(
                         min_cluster_size=self.hdbscan_clusters.min_cluster_size,
@@ -490,13 +489,12 @@ class BirdNetParser(BirdNetParserBase):
                     "\nNo valid embeddings extracted from the audio files. Skipping dimensionality reduction and clustering.")
 
             if not self.analyze_file_group:
-                archive_dir_path = source_audio_dir / "processed" / first_file_name
+                archive_dir_path = source_audio_dir / first_file_name
                 archive_dir_path.mkdir(parents=True, exist_ok=True)
                 for file_path in audio_files:
                     try:
                         destination = archive_dir_path / file_path.name
                         shutil.move(str(file_path), str(destination))
-                        print(f"Moved: {file_path.name} -> processed/{first_file_name}/")
                     except Exception as e:
                         print(f"Failed to move {file_path.name}: {e}")
                 # move the log files

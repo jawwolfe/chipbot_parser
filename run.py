@@ -6,8 +6,7 @@ EXTERNAL_DRIVE = config.EXTERNAL_DRIVE
 AUDIO_PATH = config.ROOT_DATA_PATH + "\\input"
 OUTPUT_PATH = config.ROOT_DATA_PATH + "\\output"
 SPECIES_LIST = config.ROOT_DATA_PATH + "\\species\\" + config.SPECIES_LIST
-MIN_CONFIDENCE_OUTPUT = config.MIN_CONFIDENCE_OUTPUT
-MIN_CONFIDENCE_INPUT = config.MIN_CONFIDENCE_INPUT
+MIN_CONFIDENCE = config.MIN_CONFIDENCE
 GAP_MS = config.GAP_MS
 MIN_CLUSTER_SIZE = config.MIN_CLUSTER_SIZE
 MIN_SAMPLES = config.MIN_SAMPLES
@@ -47,8 +46,8 @@ def initialize_hdbscan():
 
 
 parse = BirdNetParser(logger='', audio_path=AUDIO_PATH, output_path=OUTPUT_PATH,
-                      min_confidence_input=MIN_CONFIDENCE_INPUT, species_list=SPECIES_LIST,
-                      external_drive=EXTERNAL_DRIVE, min_confidence_output=MIN_CONFIDENCE_OUTPUT,
+                      min_confidence=MIN_CONFIDENCE, species_list=SPECIES_LIST,
+                      external_drive=EXTERNAL_DRIVE,
                       gap_ms=GAP_MS, umap=initialize_umap(), umap_second=initialize_umap_sec(),
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
                       analyze_file_group=ANALYZE_FILE_GROUP)
