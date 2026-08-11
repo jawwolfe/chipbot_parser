@@ -1,11 +1,12 @@
 from birdnet_detect_and_cluster import BirdNetParser
 from configs import config
+from pathlib import Path
 from ml_parameters.ml_parameters import UMAPParams, HDBSCANClusters
 
 EXTERNAL_DRIVE = config.EXTERNAL_DRIVE
-AUDIO_PATH = config.ROOT_DATA_PATH + "\\input"
-OUTPUT_PATH = config.ROOT_DATA_PATH + "\\output"
-SPECIES_LIST = config.ROOT_DATA_PATH + "\\species\\" + config.SPECIES_LIST
+AUDIO_PATH = config.ROOT_DATA_PATH / Path("Input")
+OUTPUT_PATH = config.ROOT_DATA_PATH / Path("Output")
+SPECIES_LIST = config.ROOT_DATA_PATH / Path("species") / config.SPECIES_LIST
 MIN_CONFIDENCE = config.MIN_CONFIDENCE
 GAP_MS = config.GAP_MS
 MIN_CLUSTER_SIZE = config.MIN_CLUSTER_SIZE

@@ -1,13 +1,19 @@
-ROOT_DATA_PATH = ""
-SPECIES_LIST = 'philippines.txt'
-MIN_CONFIDENCE = 0.7
+import sys
+from pathlib import Path
+if sys.platform == "win32":
+    DRIVE_ROOT = Path("C:/")
+else:
+    DRIVE_ROOT = Path("/mnt/c/")
+ROOT_DATA_PATH = DRIVE_ROOT / Path("")
+SPECIES_LIST = ''
+MIN_CONFIDENCE = 0.3
 GAP_MS = 100
 EXTERNAL_DRIVE = 'D'
 # HDBSCAN
 MIN_CLUSTER_SIZE = 10 # 4 baseline
-MIN_SAMPLES = 7 # 3 baseline
+MIN_SAMPLES = 5 # 3 baseline
 CLUSTER_METRIC = 'euclidean'
-CLUSTER_SELECTION_EPSILON = .1
+CLUSTER_SELECTION_EPSILON = 0
 # UMAP Cluster
 N_NEIGHBORS = 15
 MIN_DISTANCE = 0.0
@@ -20,5 +26,5 @@ MIN_DISTANCE_VIZ = 0.0
 N_COMPONENTS_VIZ = 2
 NMAP_METRIC_VIZ = 'cosine'
 RANDOM_STATE_VIZ = 42
-ANALYSIS_RUN_TEXT = 'rev_clu_sam'
-ANALYZE_FILE_GROUP = 'aw_chipbot_01_2026-08-07_09_15_27_39.875337_-86.284028'
+ANALYSIS_RUN_TEXT = ''
+ANALYZE_FILE_GROUP = ''

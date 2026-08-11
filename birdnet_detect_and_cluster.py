@@ -340,7 +340,7 @@ class BirdNetParser(BirdNetParserBase):
 
         if self.analyze_file_group:
             # doing a reanalysis now of existing files
-            source_audio_dir = Path(self.audio_path + "\\" + self.analyze_file_group)
+            source_audio_dir = self.audio_path / self.analyze_file_group
             run_suffix = self.analysis_run_text
         else:
             # running new file group fom external drive
@@ -596,13 +596,12 @@ class BirdNetParser(BirdNetParserBase):
         cache.close_all()
 
         with open(output_path_results / "summary.txt", "a") as summary:
-            summary.write('File set length: ' + str(total_audio_seconds_approx) + ' seconds of audio\n')
-            summary.write(str(n_species) + ' species in ' + str(species_seconds) + ' seconds of audio\n')
-            summary.write(str(n_clusters) + ' clusters in ' + str(clustered_seconds) + ' seconds of audio\n')
-            summary.write(str(noise_seconds) + ' seconds of background noise\n')
-            summary.write('Number of unique files: ' + str(len(by_cluster_species)) + '\n')
+            summary.write(str(total_audio_seconds_approx) + ' total seconds of audio analyzed\n')
+            summary.write(str(n_species) + ' species detected in ' + str(species_seconds) + ' seconds of audio\n')
+            summary.write(str(n_clusters) + ' additional unique clusters in ' + str(clustered_seconds) + ' seconds of audio\n')
+            summary.write(str(noise_seconds) + ' seconds of background noise\n\n')
             summary.write('Species Detection Min confidence: ' + str(self.min_confidence) + '\n\n')
-            summary.write('HDBSCAN\n')
+            summary.write('HDBSCAN Parameters used\n')
             summary.write('Min cluster size: ' + str(self.hdbscan_clusters.min_cluster_size) + '\n')
             summary.write('Min samples: ' + str(self.hdbscan_clusters.min_samples) + '\n')
             summary.write('Metric: ' + str(self.hdbscan_clusters.cluster_metric) + '\n')
