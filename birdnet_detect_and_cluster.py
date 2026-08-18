@@ -11,6 +11,8 @@ from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
 import shutil, os, csv, sys, wave, re
 from collections import defaultdict
+from pinecone import Pinecone
+import requests
 
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 
@@ -50,7 +52,8 @@ class WavCache:
 
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, output_path, min_confidence, overlap,
-                 species_list, gap_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group):
+                 species_list, gap_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group,
+                 pinecone_key):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
@@ -63,7 +66,45 @@ class BirdNetParser(BirdNetParserBase):
         self.hdbscan_clusters = hdbscan_clusters
         self.analysis_run_text = analysis_run_text
         self.analyze_file_group = analyze_file_group
+        self.pinecone_key = pinecone_key
         BirdNetParserBase.__init__(self, logger=logger)
+
+    def get_regions(self, gps_coordinates):
+        # Input coordinates (works globally, e.g., Paris, Tokyo, or New York)
+        lat, lon = 48.8566, 2.3522
+
+        # Use the GeocodeJSON format to force numbered admin levels
+        url = f"https://openstreetmap.org{lat}&lon={lon}&format=geocodejson&addressdetails=1"
+        headers = {"User-Agent": "global_level_extractor_script"}
+
+        try:
+            response = requests.get(url, headers=headers).json()
+
+            # Extract the features collection block
+            if "features" in response and len(response["features"]) > 0:
+                geocoded_stuff = response["features"][0]["properties"]
+
+                # Pull standard text data
+                country = geocoded_stuff.get("geocoding", {}).get("country", "N/A")
+
+                # Access the universally structured admin levels dictionary
+                admin_levels = geocoded_stuff.get("geocoding", {}).get("admin", {})
+
+                # Extract based on OpenStreetMap standardized admin hierarchy keys
+                level_2 = admin_levels.get("level2", country)  # Defaults to Country boundary
+                level_3 = admin_levels.get("level3", "N/A")  # Usually State, Prefecture, or Region
+                level_4 = admin_levels.get("level4", "N/A")  # Usually Province, County, or Department
+                level_5 = admin_levels.get("level5", "N/A")  # Usually City, Municipality, or Local District
+
+                print(f"Standardized Level 1 (Country): {country}")
+                print(f"Standardized Level 2 (Major):   {level_3}")
+                print(f"Standardized Level 3 (Sub-Reg): {level_4}")
+                print(f"Standardized Level 4 (Local):   {level_5}")
+            else:
+                print("Coordinates matched to international waters or missing data.")
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
 
     def read_rows(self, csv_path):
         rows = []
@@ -214,6 +255,102 @@ class BirdNetParser(BirdNetParserBase):
                     out_wf.writeframes(data)
                     if gap_bytes and idx != len(group) - 1:
                         out_wf.writeframes(gap_bytes)
+
+    def _fetch_all_vectors(self, index, namespace, filter=None, batch_size=100):
+        """
+        Pulls all vectors (+ metadata) from a Pinecone namespace, optionally
+        filtered by metadata. Returns a list of dicts: [{"id", "values", "metadata"}, ...]
+        """
+        all_records = []
+        ids_to_fetch = []
+
+        # Step 1: list all IDs in the namespace (paginated)
+        for id_batch in index.list(namespace=namespace):
+            ids_to_fetch.extend(id_batch)
+
+        print(f"Found {len(ids_to_fetch)} vector IDs in namespace '{namespace}' — fetching in batches...")
+
+        # Step 2: fetch full records in batches (Pinecone fetch() has a per-call ID limit)
+        for i in range(0, len(ids_to_fetch), batch_size):
+            batch_ids = ids_to_fetch[i:i + batch_size]
+            response = index.fetch(ids=batch_ids, namespace=namespace)
+
+            for vec_id, record in response.vectors.items():
+                meta = record.metadata or {}
+                # Apply metadata filter client-side if index.list() couldn't pre-filter
+                if filter and not all(meta.get(k) == v for k, v in filter.items()):
+                    continue
+                all_records.append({
+                    "id": vec_id,
+                    "values": record.values,
+                    "metadata": meta,
+                })
+
+            if (i // batch_size) % 20 == 0:
+                print(f"  fetched {i + len(batch_ids)}/{len(ids_to_fetch)}...")
+
+        print(f"Retrieved {len(all_records)} vectors after filtering.")
+        return all_records
+
+
+    def extract_and_store(self, index_name="chipbot-birdnet-24"):
+        pc = Pinecone(api_key=self.pinecone_key)
+        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
+        index = pc.Index(index_name)
+
+        source_audio_dir = Path(self.audio_path)
+        audio_files = natsort.natsorted(
+            [f for f in source_audio_dir.iterdir() if f.suffix.lower() == ".wav"],
+            key=lambda x: str(x)
+        )
+
+        for idx, file_path in enumerate(audio_files, 1):
+            print(f"[{idx}/{len(audio_files)}] Embedding: {file_path.name}")
+            try:
+                detections, embeddings, metadata = self.extract_embeddings_and_detect(
+                    file_path, analyzer)
+            except Exception as e:
+                print(f"Error on {file_path.name}: {e}")
+                continue
+
+            if len(embeddings) == 0:
+                continue
+
+            vectors = []
+            for i, (emb, meta) in enumerate(zip(embeddings, metadata)):
+                vectors.append({
+                    "id": f"{file_path.stem}_{i}",
+                    "values": emb.tolist(),
+                    "metadata": {
+                        "file": meta["file"],
+                        "start_time": meta["start_time"],
+                        "end_time": meta["end_time"],
+                        "birdnet_label": meta["birdnet_label"],
+                        "confidence": meta["confidence"],
+                        "latitude": meta["latitude"],
+                        "longitude": meta["longitude"],
+                        "site_name": "large_mangrove_nw",
+                        "region_1": "Philippines",
+                        "region_2": "Cebu",
+                        "region_3": "San Francisco",
+                        "region_4": "barangay",
+                        "recording_device": '',
+                        "embedding_model_version": self.embedding_model_version,  # you'll want to track this
+                        "species_list_version": self.species_list_version,
+                        "min_confidence_used": self.min_confidence,
+                    }
+                })
+
+            index.upsert(vectors=vectors)
+
+            # archive the raw file the same way run_pipeline does today
+            # (keep this part — you still want raw audio preserved)
+
+        print("Extraction and storage complete.")
+
+
+
+
 
 
     def extract_embeddings_and_detect(self, file_path, analyzer):

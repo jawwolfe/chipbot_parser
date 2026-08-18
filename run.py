@@ -26,6 +26,7 @@ NMAP_METRIC_VIZ = config.NMAP_METRIC_VIZ
 RANDOM_STATE_VIZ = config.RANDOM_STATE_VIZ
 ANALYSIS_RUN_TEXT = config.ANALYSIS_RUN_TEXT
 ANALYZE_FILE_GROUP = config.ANALYZE_FILE_GROUP
+PINECONE_KEY = config.PINECONE_KEY
 
 
 def initialize_umap():
@@ -52,6 +53,6 @@ parse = BirdNetParser(logger='', audio_path=AUDIO_PATH, output_path=OUTPUT_PATH,
                       external_drive=EXTERNAL_DRIVE,
                       gap_ms=GAP_MS, umap=initialize_umap(), umap_viz=initialize_umap_viz(),
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
-                      analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP)
+                      analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP, pinecone_key=PINECONE_KEY)
 
 parse.run_pipeline()
