@@ -8,6 +8,7 @@ AUDIO_PATH = config.ROOT_DATA_PATH / Path("Input")
 OUTPUT_PATH = config.ROOT_DATA_PATH / Path("Output")
 SPECIES_LIST = config.ROOT_DATA_PATH / Path("species") / config.SPECIES_LIST
 MIN_CONFIDENCE = config.MIN_CONFIDENCE
+OVERLAP = config.OVERLAP
 GAP_MS = config.GAP_MS
 MIN_CLUSTER_SIZE = config.MIN_CLUSTER_SIZE
 MIN_SAMPLES = config.MIN_SAMPLES
@@ -51,6 +52,6 @@ parse = BirdNetParser(logger='', audio_path=AUDIO_PATH, output_path=OUTPUT_PATH,
                       external_drive=EXTERNAL_DRIVE,
                       gap_ms=GAP_MS, umap=initialize_umap(), umap_viz=initialize_umap_viz(),
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
-                      analyze_file_group=ANALYZE_FILE_GROUP)
+                      analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP)
 
 parse.run_pipeline()

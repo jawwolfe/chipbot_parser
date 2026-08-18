@@ -49,12 +49,13 @@ class WavCache:
             wf.close()
 
 class BirdNetParser(BirdNetParserBase):
-    def __init__(self, logger, external_drive, audio_path, output_path, min_confidence,
+    def __init__(self, logger, external_drive, audio_path, output_path, min_confidence, overlap,
                  species_list, gap_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
         self.min_confidence = min_confidence
+        self.overlap = overlap
         self.species_list_path = species_list
         self.gap_ms = gap_ms
         self.umap = umap
@@ -221,7 +222,8 @@ class BirdNetParser(BirdNetParserBase):
         then dynamically builds a patched Analyzer to extract 1024-D embeddings.
         """
         # 1. Standard detection using your custom-list analyzer
-        detection_recording = Recording(analyzer=analyzer, path=str(file_path), min_conf=self.min_confidence)
+        detection_recording = Recording(analyzer=analyzer, path=str(file_path), min_conf=self.min_confidence,
+                                        overlap=self.overlap)
         detection_recording.analyze()
         detections = detection_recording.detections
 
@@ -239,7 +241,7 @@ class BirdNetParser(BirdNetParserBase):
         try:
             # Moving the instantiation HERE forces the embedding engine to preserve intermediate layers
             embedding_analyzer = Analyzer()
-            embedding_recording = Recording(analyzer=embedding_analyzer, path=str(file_path))
+            embedding_recording = Recording(analyzer=embedding_analyzer, path=str(file_path), overlap=self.overlap)
             embedding_recording.analyze()
             embedding_recording.extract_embeddings()
 
@@ -287,8 +289,9 @@ class BirdNetParser(BirdNetParserBase):
         chunks_metadata = []
 
         # Map chunks to detections
+        step = 3.0 - self.overlap  # window duration minus overlap
         for i, chunk in enumerate(chunks):
-            start_time = i * 3.0
+            start_time = i * step
             end_time = start_time + 3.0
 
             # Pull the matching 1024-D vector
@@ -601,6 +604,7 @@ class BirdNetParser(BirdNetParserBase):
             summary.write(str(n_clusters) + ' additional unique clusters in ' + str(clustered_seconds) + ' seconds of audio\n')
             summary.write(str(noise_seconds) + ' seconds of background noise\n\n')
             summary.write('Species Detection Min confidence: ' + str(self.min_confidence) + '\n\n')
+            summary.write('Overlap: ' + str(self.overlap) + '\n\n')
             summary.write('HDBSCAN Parameters used\n')
             summary.write('Min cluster size: ' + str(self.hdbscan_clusters.min_cluster_size) + '\n')
             summary.write('Min samples: ' + str(self.hdbscan_clusters.min_samples) + '\n')
