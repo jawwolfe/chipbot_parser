@@ -11,6 +11,8 @@ from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
 import shutil, os, csv, sys, wave, re
 from collections import defaultdict
+import requests
+from mu_utilities.utilities import SQLServerUtilities
 
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 
@@ -50,7 +52,8 @@ class WavCache:
 
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, output_path, min_confidence, overlap,
-                 species_list, gap_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group):
+                 species_list, gap_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group,
+                 sqlserver_connection):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
@@ -63,7 +66,79 @@ class BirdNetParser(BirdNetParserBase):
         self.hdbscan_clusters = hdbscan_clusters
         self.analysis_run_text = analysis_run_text
         self.analyze_file_group = analyze_file_group
+        self.sqlserver_connection = sqlserver_connection
         BirdNetParserBase.__init__(self, logger=logger)
+
+
+    def get_regions(self, gps_coordinates):
+        lat, lon = gps_coordinates
+
+        # Query Nominatim API with maximum address detail
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=jsonv2&addressdetails=1"
+        headers = {"User-Agent": "global_level_extractor_script"}
+
+        try:
+            response = requests.get(url, headers=headers).json()
+            address = response.get("address", {})
+
+            # Handle village and hamlet combination logic
+            village = address.get("village")
+            hamlet = address.get("hamlet")
+
+            if village and hamlet:
+                local = f"{village}_{hamlet}"
+            elif village:
+                local = village
+            elif hamlet:
+                local = hamlet
+            else:
+                # Fallback to other local district tags if neither village nor hamlet exist
+                local = (
+                        address.get("quarter")
+                        or address.get("suburb")
+                        or address.get("neighbourhood")
+                        or "N/A"
+                )
+            # 2. Municipality / Town / City
+            municipality = (
+                    address.get("town")
+                    or address.get("municipality")
+                    or address.get("city")
+                    or address.get("city_district")
+                    or "N/A"
+            )
+
+            # 3. Province / State / County
+            province = (
+                    address.get("province")
+                    or address.get("state_district")
+                    or address.get("state")
+                    or address.get("county")
+                    or "N/A"
+            )
+
+            # 4. Broader Region / Island Group
+            region = (
+                    address.get("ISO3166-2-lvl4")
+                    or address.get("region")
+                    or address.get("state")
+                    or "N/A"
+            )
+
+            # 5. Country
+            country = address.get("country", "N/A")
+
+            return {
+                "local_barangay": local,
+                "municipality": municipality,
+                "province": province,
+                "region": region,
+                "country": country
+            }
+
+        except Exception as e:
+            print(f"An error occurred: {e}")
+            return None
 
     def read_rows(self, csv_path):
         rows = []
@@ -329,6 +404,14 @@ class BirdNetParser(BirdNetParserBase):
     def run_pipeline(self):
         output_dir = Path(self.output_path)
         external_dir = Path(self.external_drive + '://')
+
+        gps = 10.6512081, 124.3877694
+        locations = self.get_regions(gps)
+        params = '@lat=?, @long=?'
+
+        utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
+                                       params_values=gps, params=params, logger=self.logger)
+        new_bird_list = utilities.run_sql_return_params()
 
         # GPU check
         gpus = tf.config.list_physical_devices('GPU')
