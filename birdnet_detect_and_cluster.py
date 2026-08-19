@@ -70,41 +70,74 @@ class BirdNetParser(BirdNetParserBase):
         BirdNetParserBase.__init__(self, logger=logger)
 
     def get_regions(self, gps_coordinates):
-        # Input coordinates (works globally, e.g., Paris, Tokyo, or New York)
-        lat, lon = 48.8566, 2.3522
+        lat, lon = gps_coordinates
 
-        # Use the GeocodeJSON format to force numbered admin levels
-        url = f"https://openstreetmap.org{lat}&lon={lon}&format=geocodejson&addressdetails=1"
+        # Query Nominatim API with maximum address detail
+        url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=jsonv2&addressdetails=1"
         headers = {"User-Agent": "global_level_extractor_script"}
 
         try:
             response = requests.get(url, headers=headers).json()
+            address = response.get("address", {})
 
-            # Extract the features collection block
-            if "features" in response and len(response["features"]) > 0:
-                geocoded_stuff = response["features"][0]["properties"]
+            # Handle village and hamlet combination logic
+            village = address.get("village")
+            hamlet = address.get("hamlet")
 
-                # Pull standard text data
-                country = geocoded_stuff.get("geocoding", {}).get("country", "N/A")
-
-                # Access the universally structured admin levels dictionary
-                admin_levels = geocoded_stuff.get("geocoding", {}).get("admin", {})
-
-                # Extract based on OpenStreetMap standardized admin hierarchy keys
-                level_2 = admin_levels.get("level2", country)  # Defaults to Country boundary
-                level_3 = admin_levels.get("level3", "N/A")  # Usually State, Prefecture, or Region
-                level_4 = admin_levels.get("level4", "N/A")  # Usually Province, County, or Department
-                level_5 = admin_levels.get("level5", "N/A")  # Usually City, Municipality, or Local District
-
-                print(f"Standardized Level 1 (Country): {country}")
-                print(f"Standardized Level 2 (Major):   {level_3}")
-                print(f"Standardized Level 3 (Sub-Reg): {level_4}")
-                print(f"Standardized Level 4 (Local):   {level_5}")
+            if village and hamlet:
+                local = f"{village}_{hamlet}"
+            elif village:
+                local = village
+            elif hamlet:
+                local = hamlet
             else:
-                print("Coordinates matched to international waters or missing data.")
+                # Fallback to other local district tags if neither village nor hamlet exist
+                local = (
+                        address.get("quarter")
+                        or address.get("suburb")
+                        or address.get("neighbourhood")
+                        or "N/A"
+                )
+            # 2. Municipality / Town / City
+            municipality = (
+                    address.get("town")
+                    or address.get("municipality")
+                    or address.get("city")
+                    or address.get("city_district")
+                    or "N/A"
+            )
+
+            # 3. Province / State / County
+            province = (
+                    address.get("province")
+                    or address.get("state_district")
+                    or address.get("state")
+                    or address.get("county")
+                    or "N/A"
+            )
+
+            # 4. Broader Region / Island Group
+            region = (
+                    address.get("ISO3166-2-lvl4")
+                    or address.get("region")
+                    or address.get("state")
+                    or "N/A"
+            )
+
+            # 5. Country
+            country = address.get("country", "N/A")
+
+            return {
+                "local_barangay": local,
+                "municipality": municipality,
+                "province": province,
+                "region": region,
+                "country": country
+            }
 
         except Exception as e:
             print(f"An error occurred: {e}")
+            return None
 
     def read_rows(self, csv_path):
         rows = []
@@ -466,6 +499,9 @@ class BirdNetParser(BirdNetParserBase):
     def run_pipeline(self):
         output_dir = Path(self.output_path)
         external_dir = Path(self.external_drive + '://')
+        gps = (8.547537,124.315349)
+        locations = self.get_regions(gps_coordinates=gps)
+
 
         # GPU check
         gpus = tf.config.list_physical_devices('GPU')
