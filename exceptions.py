@@ -8,7 +8,7 @@ class DatabaseOperationException(Exception):
     pass
 
 
-class NoErrorsException(Exception):
+class RawAudioBatchException(Exception):
     """An error occurred locating error file for processing."""
     pass
 

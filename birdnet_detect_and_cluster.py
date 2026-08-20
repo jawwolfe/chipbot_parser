@@ -3,7 +3,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import natsort
-import tensorflow as tf
+#import tensorflow as tf
 # Clustering and reduction
 import umap
 from sklearn.cluster import HDBSCAN
@@ -13,6 +13,7 @@ import shutil, os, csv, sys, wave, re
 from collections import defaultdict
 import requests
 from mu_utilities.utilities import SQLServerUtilities
+from exceptions import RawAudioBatchException
 
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 
@@ -401,6 +402,81 @@ class BirdNetParser(BirdNetParserBase):
         return detections, np.array(valid_embeddings), chunks_metadata
 
 
+
+
+    def import_embed_file_batch(self):
+        self.logger.info("Begin script importing embedding files.")
+        audio_extensions = {".wav"}
+        audio_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in audio_extensions]
+        if not audio_files_ext:
+            msg = f"No matching audio (.wav) files found in external_drive: {self.external_drive}"
+            self.logger.error(msg)
+            raise FileNotFoundError(msg)
+        audio_files_ext = natsort.natsorted(audio_files_ext, key=lambda x: str(x))
+
+        expected_value = None
+        gps = None
+        c = 0
+        for raw_file in audio_files_ext:
+            c += 1
+            my_file_parts = raw_file.stem.split("_")
+            gps = my_file_parts[2], my_file_parts[3]
+            utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
+                                           params_values=gps, params='@lat=?, @long=?', logger=self.logger)
+            current_value = utilities.run_sql_return_params()
+            if not current_value:
+                msg = f"This file's GPS coordinates cant not be found in an existing site: {raw_file.stem}\n"
+                msg += f"GPS coordinates of missing or different site:\n{gps}\n"
+                self.logger.error(msg)
+                raise RawAudioBatchException(msg)
+            if expected_value is None:
+                expected_value = current_value
+            elif current_value != expected_value:
+                # Throw an error immediately if a mismatch occurs
+                msg = f"Multiple sites or no site found\n" + str(raw_file) + "\nExpected: {expected_value}\nActual: {current_value}\n"
+                msg += f"GPS coordinates of missing or different site:\n{gps}\n"
+                self.logger.error(msg)
+                raise RawAudioBatchException(msg)
+
+        first_file_name = audio_files_ext[0].stem
+        first_file_datetime = first_file_name.split("_")[-3]
+        last_file_name = audio_files_ext[-1].stem
+        last_file_datetime = last_file_name.split("_")[-3]
+        my_locations = self.get_regions(gps)
+        my_site = expected_value[0][0].replace(' ', '-')
+        my_country = my_locations['country'].replace(' ', '-')
+        my_province = my_locations['province'].replace(' ', '-')
+        archive_stem = (my_country + "_" + my_province + "_" + my_site + '_' +
+                        first_file_datetime + "_" + last_file_datetime)
+        print(archive_stem)
+        self.logger.info(str(c) + ' raw files imported into archive directory named: ' + archive_stem)
+
+
+
+
+
+        # todo move all wav files and txt files to a new batch directory
+        # batch name:  Loc 1 (country), Loc 2 (region), site name (with underscores), start datetime, end datetime
+
+
+
+        # todo run birdnet embeddings TWICE on each file in this new batch
+        # first pass is at 1.5 overlap just to get the detection of each chunk
+        # second pass it at 0 overlap to store in pinecone including the detection metadata from 1st pass
+        # collect species detections into a file and carve up audio for each
+        # make metadata for each chunck
+        # upsert vectors into Pinecone
+
+
+
+        pass
+
+
+    def run_cluster_analysis(self, batch_id):
+
+        pass
+
+
     def run_pipeline(self):
         # GPU check
         gpus = tf.config.list_physical_devices('GPU')
@@ -436,21 +512,12 @@ class BirdNetParser(BirdNetParserBase):
                         shutil.move(item, Path(self.audio_path) / item.name)
                     else:
                         item.unlink()
-            source_audio_dir = Path(self.audio_path)
+
             run_suffix = 'initial'
 
 
 
-        audio_extensions = {".wav"}
-        audio_dir_path = Path(source_audio_dir)
-        audio_files = [f for f in audio_dir_path.iterdir() if f.suffix.lower() in audio_extensions]
-        if not audio_files:
-            print(f"No matching audio files found.")
-            return
 
-        audio_files = natsort.natsorted(audio_files, key=lambda x: str(x))
-        first_file_name = audio_files[0].stem
-        last_file_name = audio_files[-1].stem
         analysis_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
         output_path_results = Path(Path(self.output_path) / f"{first_file_name}_{analysis_timestamp}_{run_suffix}")

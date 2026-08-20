@@ -85,4 +85,4 @@ parse = BirdNetParser(logger=initialize_logger('chipbot_parser'), audio_path=AUD
                       analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP,
                       sqlserver_connection=initialize_sqlserver())
 
-parse.run_pipeline()
+parse.import_embed_file_batch()
