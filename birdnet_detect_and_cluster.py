@@ -402,17 +402,6 @@ class BirdNetParser(BirdNetParserBase):
 
 
     def run_pipeline(self):
-        output_dir = Path(self.output_path)
-        external_dir = Path(self.external_drive + '://')
-
-        gps = 10.6512081, 124.3877694
-        locations = self.get_regions(gps)
-        params = '@lat=?, @long=?'
-
-        utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
-                                       params_values=gps, params=params, logger=self.logger)
-        new_bird_list = utilities.run_sql_return_params()
-
         # GPU check
         gpus = tf.config.list_physical_devices('GPU')
         if gpus:
@@ -420,9 +409,18 @@ class BirdNetParser(BirdNetParserBase):
         else:
             print("No GPU detected. Defaulting to CPU.\n")
 
-        # Initialize the customized detector
-        print("Initializing customized species list analyzer...")
-        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
+
+
+
+        gps = 10.6473347, 124.3891271
+        locations = self.get_regions(gps)
+        print(locations)
+        utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
+                                       params_values=gps, params='@lat=?, @long=?', logger=self.logger)
+        site = utilities.run_sql_return_params()
+        print(site)
+
+
 
         if self.analyze_file_group:
             # doing a reanalysis now of existing files
@@ -431,7 +429,7 @@ class BirdNetParser(BirdNetParserBase):
         else:
             # running new file group fom external drive
             valid_extensions = {".wav", ".txt"}
-            for item in external_dir.iterdir():
+            for item in Path(self.external_drive).iterdir():
                 # Only process non-recursive files matching valid extensions
                 if item.is_file() and item.suffix.lower() in valid_extensions:
                     if item.stat().st_size > 0:
@@ -440,6 +438,8 @@ class BirdNetParser(BirdNetParserBase):
                         item.unlink()
             source_audio_dir = Path(self.audio_path)
             run_suffix = 'initial'
+
+
 
         audio_extensions = {".wav"}
         audio_dir_path = Path(source_audio_dir)
@@ -450,10 +450,18 @@ class BirdNetParser(BirdNetParserBase):
 
         audio_files = natsort.natsorted(audio_files, key=lambda x: str(x))
         first_file_name = audio_files[0].stem
+        last_file_name = audio_files[-1].stem
         analysis_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
         output_path_results = Path(Path(self.output_path) / f"{first_file_name}_{analysis_timestamp}_{run_suffix}")
         output_path_results.mkdir(parents=True, exist_ok=True)
         detection_file_path = output_path_results / f"detection_results_{first_file_name}_{analysis_timestamp}_{run_suffix}.txt"
+
+        # Initialize the customized detector
+        print("Initializing customized species list analyzer...")
+        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
+
+
 
         all_embeddings = []
         all_metadata = []
@@ -604,6 +612,7 @@ class BirdNetParser(BirdNetParserBase):
                 archive_dir_path = source_audio_dir
 
         # Now extract clusters and species
+        output_dir = Path(self.output_path)
         run_folder_name = f"{first_file_name}_{analysis_timestamp}_{run_suffix}"
         output_base = output_dir / run_folder_name
         audio_archive = source_audio_dir / "processed" / first_file_name
