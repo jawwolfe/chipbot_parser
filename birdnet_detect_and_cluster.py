@@ -474,6 +474,45 @@ class BirdNetParser(BirdNetParserBase):
 
 
 
+        detection_file_path = output_path_results / f"detection_results_{first_file_name}_{analysis_timestamp}_{run_suffix}.txt"
+        audio_extensions = {".wav"}
+        audio_files = [f for f in archive_dir.iterdir() if f.suffix.lower() in audio_extensions]
+        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
+
+        all_embeddings = []
+        all_metadata = []
+        with open(detection_file_path, "w", encoding="utf-8") as f_out:
+            for index, file_path in enumerate(audio_files, 1):
+                print(f"[{index}/{len(audio_files)}] Processing: {file_path.name}...")
+                f_out.write(f"=== File: {file_path.name} ===\n")
+
+                try:
+                    detections, embeddings, metadata = self.extract_embeddings_and_detect(
+                        file_path, analyzer)
+
+                    if len(embeddings) > 0:
+                        all_embeddings.append(embeddings)
+                        all_metadata.extend(metadata)
+
+                    # Write text detections
+                    if not detections:
+                        f_out.write("No detections found.\n")
+                    else:
+                        for detection in detections:
+                            result_line = (
+                                f"Time: {detection['start_time']:.1f}s - {detection['end_time']:.1f}s | "
+                                f"Species: {detection['common_name']} ({detection['scientific_name']}) | "
+                                f"Confidence: {detection['confidence']:.2%}\n"
+                            )
+                            f_out.write(result_line)
+
+                except Exception as e:
+                    error_msg = f"Error processing {file_path.name}: {e}\n"
+                    f_out.write(error_msg)
+                    print(error_msg)
+
+                f_out.write("\n" + "=" * 50 + "\n\n")
+
         pass
 
 
