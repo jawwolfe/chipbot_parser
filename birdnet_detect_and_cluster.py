@@ -448,15 +448,20 @@ class BirdNetParser(BirdNetParserBase):
         my_province = my_locations['province'].replace(' ', '-')
         archive_stem = (my_country + "_" + my_province + "_" + my_site + '_' +
                         first_file_datetime + "_" + last_file_datetime)
-        print(archive_stem)
+        archive_dir = Path(self.audio_path) / Path(archive_stem)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        for file_path in audio_files_ext:
+            if file_path.is_file():
+                shutil.move(file_path, archive_dir)
         self.logger.info(str(c) + ' raw files imported into archive directory named: ' + archive_stem)
-
-
-
-
-
-        # todo move all wav files and txt files to a new batch directory
-        # batch name:  Loc 1 (country), Loc 2 (region), site name (with underscores), start datetime, end datetime
+        c = 0
+        log_extensions = {".txt"}
+        log_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in log_extensions]
+        for file_path in log_files_ext:
+            if file_path.is_file():
+                c += 1
+                shutil.move(file_path, archive_dir)
+        self.logger.info(str(c) + ' log files imported into archive directory named: ' + archive_stem)
 
 
 
