@@ -4,7 +4,6 @@ from pathlib import Path
 from ml_parameters.ml_parameters import UMAPParams, HDBSCANClusters
 from connection import SQLServerConnection
 import os, datetime, logging
-from mu_utilities.utilities import SQLServerUtilities
 
 dir_path = os.getcwd()
 APP_NAME = dir_path[dir_path.rindex('/')+1:]
@@ -39,6 +38,8 @@ SQLSERVER_DATABASE = config.SQLSERVER_DATABASE
 SQLSERVER_USERNAME = config.SQLSERVER_USERNAME
 SQLSERVER_TOKEN = config.SQLSERVER_TOKEN
 SQLSERVER_KEY = config.SQLSERVER_KEY
+PINECONE_KEY = config.PINECONE_KEY
+BIRDNET_MODEL_VERSION = config.BIRDNET_MODEL_VERSION
 
 
 def initialize_logger(directory):
@@ -83,6 +84,8 @@ parse = BirdNetParser(logger=initialize_logger('chipbot_parser'), audio_path=AUD
                       gap_ms=GAP_MS, umap=initialize_umap(), umap_viz=initialize_umap_viz(),
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
                       analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP,
-                      sqlserver_connection=initialize_sqlserver())
+                      sqlserver_connection=initialize_sqlserver(), pinecone_key=PINECONE_KEY)
 
-parse.import_embed_file_batch()
+parse.extract_and_store(source_audio_dir=AUDIO_PATH / "United-States_Indiana_Indianapolis-House-Backyard_2026-07-17-190624_2026-07-18-082620",
+                        index_name="chipbot-birdnet-24")
+

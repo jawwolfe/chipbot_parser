@@ -3,7 +3,7 @@ import pandas as pd
 from pathlib import Path
 from datetime import datetime
 import natsort
-#import tensorflow as tf
+import tensorflow as tf
 # Clustering and reduction
 import umap
 from sklearn.cluster import HDBSCAN
@@ -14,6 +14,7 @@ from collections import defaultdict
 import requests
 from mu_utilities.utilities import SQLServerUtilities
 from exceptions import RawAudioBatchException
+from pinecone import Pinecone
 
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 
@@ -54,7 +55,7 @@ class WavCache:
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, output_path, min_confidence, overlap,
                  species_list, gap_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group,
-                 sqlserver_connection):
+                 sqlserver_connection, pinecone_key, birdnet_model_version):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
@@ -68,6 +69,8 @@ class BirdNetParser(BirdNetParserBase):
         self.analysis_run_text = analysis_run_text
         self.analyze_file_group = analyze_file_group
         self.sqlserver_connection = sqlserver_connection
+        self.pinecone_key = pinecone_key
+        self.birdnet_model_version = birdnet_model_versions
         BirdNetParserBase.__init__(self, logger=logger)
 
 
@@ -130,7 +133,7 @@ class BirdNetParser(BirdNetParserBase):
             country = address.get("country", "N/A")
 
             return {
-                "local_barangay": local,
+                "local": local,
                 "municipality": municipality,
                 "province": province,
                 "region": region,
@@ -317,7 +320,7 @@ class BirdNetParser(BirdNetParserBase):
         try:
             # Moving the instantiation HERE forces the embedding engine to preserve intermediate layers
             embedding_analyzer = Analyzer()
-            embedding_recording = Recording(analyzer=embedding_analyzer, path=str(file_path), overlap=self.overlap)
+            embedding_recording = Recording(analyzer=embedding_analyzer, path=str(file_path))
             embedding_recording.analyze()
             embedding_recording.extract_embeddings()
 
@@ -402,9 +405,67 @@ class BirdNetParser(BirdNetParserBase):
         return detections, np.array(valid_embeddings), chunks_metadata
 
 
+    def extract_and_store(self, source_audio_dir, index_name="chipbot-birdnet-24"):
+        pc = Pinecone(api_key=self.pinecone_key)
+        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
+        index = pc.Index(index_name)
+
+        audio_files = natsort.natsorted(
+            [f for f in source_audio_dir.iterdir() if f.suffix.lower() == ".wav"],
+            key=lambda x: str(x)
+        )
+
+        for idx, file_path in enumerate(audio_files, 1):
+            print(f"[{idx}/{len(audio_files)}] Embedding: {file_path.name}")
+            try:
+                detections, embeddings, metadata = self.extract_embeddings_and_detect(
+                    file_path, analyzer)
+            except Exception as e:
+                print(f"Error on {file_path.name}: {e}")
+                continue
+
+            if len(embeddings) == 0:
+                continue
+            # get all the location metadata from gps coordinates
+            my_file_parts = file_path.stem.split("_")
+            gps = my_file_parts[2], my_file_parts[3]
+            utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
+                                           params_values=gps, params='@lat=?, @long=?', logger=self.logger)
+            site = utilities.run_sql_return_params()
+            my_site = site[0][0].replace(' ', '-')
+            my_locations = self.get_regions(gps)
+            my_country = my_locations['country'].replace(' ', '-')
+            my_region = my_locations['region'].replace(' ', '-')
+            my_province = my_locations['province'].replace(' ', '-')
+            my_municipality = my_locations['municipality'].replace(' ', '-')
+            my_local = my_locations['local'].replace(' ', '-')
+            vectors = []
+            for i, (emb, meta) in enumerate(zip(embeddings, metadata)):
+                vectors.append({
+                    "id": f"{file_path.stem}_{i}",
+                    "values": emb.tolist(),
+                    "metadata": {
+                        "file": meta["file"],
+                        "start_time": meta["start_time"],
+                        "end_time": meta["end_time"],
+                        "birdnet_label": meta["birdnet_label"],
+                        "confidence": meta["confidence"],
+                        "region": region,
+                        "embedding_model_version": self.birdnet_model_version,
+                        "min_confidence_used": self.min_confidence
+                    }
+                })
+
+            # batch upsert, namespaced by region per your last question
+            index.upsert(vectors=vectors, namespace=region)
+
+            # archive the raw file the same way run_pipeline does today
+            # (keep this part — you still want raw audio preserved)
+
+        print("Extraction and storage complete.")
 
 
-    def import_embed_file_batch(self):
+    def import_file_batch(self):
         self.logger.info("Begin script importing embedding files.")
         audio_extensions = {".wav"}
         audio_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in audio_extensions]
@@ -472,46 +533,7 @@ class BirdNetParser(BirdNetParserBase):
         # make metadata for each chunck
         # upsert vectors into Pinecone
 
-
-
-        detection_file_path = output_path_results / f"detection_results_{first_file_name}_{analysis_timestamp}_{run_suffix}.txt"
-        audio_extensions = {".wav"}
-        audio_files = [f for f in archive_dir.iterdir() if f.suffix.lower() in audio_extensions]
-        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
-
-        all_embeddings = []
-        all_metadata = []
-        with open(detection_file_path, "w", encoding="utf-8") as f_out:
-            for index, file_path in enumerate(audio_files, 1):
-                print(f"[{index}/{len(audio_files)}] Processing: {file_path.name}...")
-                f_out.write(f"=== File: {file_path.name} ===\n")
-
-                try:
-                    detections, embeddings, metadata = self.extract_embeddings_and_detect(
-                        file_path, analyzer)
-
-                    if len(embeddings) > 0:
-                        all_embeddings.append(embeddings)
-                        all_metadata.extend(metadata)
-
-                    # Write text detections
-                    if not detections:
-                        f_out.write("No detections found.\n")
-                    else:
-                        for detection in detections:
-                            result_line = (
-                                f"Time: {detection['start_time']:.1f}s - {detection['end_time']:.1f}s | "
-                                f"Species: {detection['common_name']} ({detection['scientific_name']}) | "
-                                f"Confidence: {detection['confidence']:.2%}\n"
-                            )
-                            f_out.write(result_line)
-
-                except Exception as e:
-                    error_msg = f"Error processing {file_path.name}: {e}\n"
-                    f_out.write(error_msg)
-                    print(error_msg)
-
-                f_out.write("\n" + "=" * 50 + "\n\n")
+        self.extract_and_store(source_audio_dir=archive_dir)
 
         pass
 
