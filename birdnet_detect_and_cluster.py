@@ -507,8 +507,8 @@ class BirdNetParser(BirdNetParserBase):
                     "values": emb.tolist(),
                     "metadata": {
                         "file": meta["file"],
-                        "start_time": meta["start_time"],
-                        "end_time": meta["end_time"],
+                        "chunk_start": meta["start_time"],
+                        "chunk_end": meta["end_time"],
                         "birdnet_label": meta["birdnet_label"],
                         "confidence": meta["confidence"],
                         "country": my_country,
@@ -546,7 +546,6 @@ class BirdNetParser(BirdNetParserBase):
             self.logger.error(msg)
             raise FileNotFoundError(msg)
         audio_files_ext = natsort.natsorted(audio_files_ext, key=lambda x: str(x))
-
         expected_value = None
         gps = None
         c = 0
@@ -617,21 +616,36 @@ class BirdNetParser(BirdNetParserBase):
         if not records:
             print("No matching vectors found.")
             return None
-
         X = np.array([r["values"] for r in records])
         df = pd.DataFrame([r["metadata"] for r in records])
-
         norms = np.linalg.norm(X, axis=1, keepdims=True)
         X_normalized = np.where(norms == 0, X, X / norms)
-
         # Clustering-space UMAP — feeds HDBSCAN
-        X_umap = umap.UMAP(**umap_params).fit_transform(X_normalized)
-        clusterer = HDBSCAN(**hdbscan_params)
+        cluster_reducer = umap.UMAP(
+            n_neighbors=self.umap.n_neighbors,
+            min_dist=self.umap.min_distance,
+            n_components=self.umap.n_components,
+            metric=self.umap.metric,
+            random_state=self.umap.random_state,
+        )
+        X_umap = cluster_reducer.fit_transform(X_normalized)
+        clusterer = HDBSCAN(
+            min_cluster_size=self.hdbscan_clusters.min_cluster_size,
+            min_samples=self.hdbscan_clusters.min_samples,
+            metric=self.hdbscan_clusters.cluster_metric,
+            cluster_selection_epsilon=self.hdbscan_clusters.cluster_selection_epsilon,
+        )
         df['cluster'] = clusterer.fit_predict(X_umap)
         df['cluster_probability'] = clusterer.probabilities_
-
         # Separate viz-space UMAP — independent fit, purely for 2D plotting
-        X_2d = umap.UMAP(**umap_viz_params).fit_transform(X_normalized)
+        viz_reducer = umap.UMAP(
+            n_neighbors=self.umap_viz.n_neighbors,
+            min_dist=self.umap_viz.min_distance,
+            n_components=self.umap_viz.n_components,
+            metric=self.umap_viz.metric,
+            random_state=self.umap_viz.random_state,
+        )
+        X_2d = viz_reducer.fit_transform(X_normalized)
         df['umap_x'] = X_2d[:, 0]
         df['umap_y'] = X_2d[:, 1]
 
