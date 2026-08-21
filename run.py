@@ -87,7 +87,7 @@ parse = BirdNetParser(logger=initialize_logger('chipbot_parser'), audio_path=AUD
                       sqlserver_connection=initialize_sqlserver(), pinecone_key=PINECONE_KEY,
                       birdnet_model_version=BIRDNET_MODEL_VERSION)
 
-#parse.extract_and_store(source_audio_dir=AUDIO_PATH / "United-States_Indiana_Indianapolis-House-Backyard_2026-07-17-200624_2026-07-18-082620",
-#                        index_name="chipbot-birdnet-24", batch_start='2026-07-17-200624', batch_end='2026-07-18-082620')
-parse.recluster(umap_params=initialize_umap(), umap_viz_params=initialize_umap_viz(), hdbscan_params=initialize_hdbscan())
+parse.extract_and_store(source_audio_dir=AUDIO_PATH / "Philippines_Cebu_Pacijan-Lake-Danao-Marsh-Cental_2026-08-07-091527_2026-08-07-105539",
+                        index_name="chipbot-birdnet-24", batch_start='2026-08-07-091527', batch_end='2026-08-07-105539')
+#parse.recluster(umap_params=initialize_umap(), umap_viz_params=initialize_umap_viz(), hdbscan_params=initialize_hdbscan())
 #parse.import_file_batch()

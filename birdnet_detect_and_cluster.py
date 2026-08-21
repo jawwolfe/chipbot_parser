@@ -469,71 +469,82 @@ class BirdNetParser(BirdNetParserBase):
         index = pc.Index(index_name)
         #index.delete(delete_all=True, namespace="__default__")
 
+        detection_file_path = source_audio_dir / f"detection_results.txt"
+
         audio_files = natsort.natsorted(
             [f for f in source_audio_dir.iterdir() if f.suffix.lower() == ".wav"],
             key=lambda x: str(x)
         )
+        with open(detection_file_path, "w", encoding="utf-8") as f_out:
+            for idx, file_path in enumerate(audio_files, 1):
+                print(f"[{idx}/{len(audio_files)}] Embedding: {file_path.name}")
+                f_out.write(f"=== File: {file_path.name} ===\n")
+                try:
+                    detections, embeddings, metadata = self.extract_embeddings_and_detect(
+                        file_path, analyzer)
+                except Exception as e:
+                    print(f"Error on {file_path.name}: {e}")
+                    continue
 
-        for idx, file_path in enumerate(audio_files, 1):
-            print(f"[{idx}/{len(audio_files)}] Embedding: {file_path.name}")
-            try:
-                detections, embeddings, metadata = self.extract_embeddings_and_detect(
-                    file_path, analyzer)
-            except Exception as e:
-                print(f"Error on {file_path.name}: {e}")
-                continue
+                if len(embeddings) == 0:
+                    continue
 
-            if len(embeddings) == 0:
-                continue
-            # get all the location metadata from gps coordinates
-            my_file_parts = file_path.stem.split("_")
-            gps = my_file_parts[2], my_file_parts[3]
-            my_device = my_file_parts[0]
-            my_datetime = my_file_parts[1]
-            utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
-                                           params_values=gps, params='@lat=?, @long=?', logger=self.logger)
-            site = utilities.run_sql_return_params()
-            my_site = site[0][0].replace(' ', '-')
-            my_locations = self.get_regions(gps)
-            my_country = my_locations['country'].replace(' ', '-')
-            my_region = my_locations['region'].replace(' ', '-')
-            my_province = my_locations['province'].replace(' ', '-')
-            my_municipality = my_locations['municipality'].replace(' ', '-')
-            my_local = my_locations['local'].replace(' ', '-')
-            vectors = []
-            for i, (emb, meta) in enumerate(zip(embeddings, metadata)):
-                vectors.append({
-                    "id": f"{file_path.stem}_{i}",
-                    "values": emb.tolist(),
-                    "metadata": {
-                        "file": meta["file"],
-                        "chunk_start": meta["start_time"],
-                        "chunk_end": meta["end_time"],
-                        "birdnet_label": meta["birdnet_label"],
-                        "confidence": meta["confidence"],
-                        "country": my_country,
-                        "region": my_region,
-                        "province": my_province,
-                        "municipality": my_municipality,
-                        "local": my_local,
-                        "site": my_site,
-                        'lat':  gps[0],
-                        'long' : gps[1],
-                        'device': my_device,
-                        'datetime': my_datetime,
-                        "embedding_model_version": self.birdnet_model_version,
-                        "min_confidence_used": self.min_confidence,
-                        "batch_start": batch_start,
-                        "batch_end": batch_end
-                    }
-                })
+                # Write text detections
+                if not detections:
+                    f_out.write("No detections found.\n")
+                else:
+                    for detection in detections:
+                        result_line = (
+                            f"Time: {detection['start_time']:.1f}s - {detection['end_time']:.1f}s | "
+                            f"Species: {detection['common_name']} ({detection['scientific_name']}) | "
+                            f"Confidence: {detection['confidence']:.2%}\n"
+                        )
+                        f_out.write(result_line)
+                f_out.write("\n" + "=" * 50 + "\n\n")
 
-            # batch upsert, namespaced by region per your last question
-            index.upsert(vectors=vectors)
-
-            # archive the raw file the same way run_pipeline does today
-            # (keep this part — you still want raw audio preserved)
-
+                # get all the location metadata from gps coordinates
+                my_file_parts = file_path.stem.split("_")
+                gps = my_file_parts[2], my_file_parts[3]
+                my_device = my_file_parts[0]
+                my_datetime = my_file_parts[1]
+                utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
+                                               params_values=gps, params='@lat=?, @long=?', logger=self.logger)
+                site = utilities.run_sql_return_params()
+                my_site = site[0][0].replace(' ', '-')
+                my_locations = self.get_regions(gps)
+                my_country = my_locations['country'].replace(' ', '-')
+                my_region = my_locations['region'].replace(' ', '-')
+                my_province = my_locations['province'].replace(' ', '-')
+                my_municipality = my_locations['municipality'].replace(' ', '-')
+                my_local = my_locations['local'].replace(' ', '-')
+                vectors = []
+                for i, (emb, meta) in enumerate(zip(embeddings, metadata)):
+                    vectors.append({
+                        "id": f"{file_path.stem}_{i}",
+                        "values": emb.tolist(),
+                        "metadata": {
+                            "file": meta["file"],
+                            "chunk_start": meta["start_time"],
+                            "chunk_end": meta["end_time"],
+                            "birdnet_label": meta["birdnet_label"],
+                            "confidence": meta["confidence"],
+                            "country": my_country,
+                            "region": my_region,
+                            "province": my_province,
+                            "municipality": my_municipality,
+                            "local": my_local,
+                            "site": my_site,
+                            'lat':  gps[0],
+                            'long' : gps[1],
+                            'device': my_device,
+                            'datetime': my_datetime,
+                            "embedding_model_version": self.birdnet_model_version,
+                            "min_confidence_used": self.min_confidence,
+                            "batch_start": batch_start,
+                            "batch_end": batch_end
+                        }
+                    })
+                index.upsert(vectors=vectors)
         print("Extraction and storage complete.")
 
 
@@ -648,8 +659,9 @@ class BirdNetParser(BirdNetParserBase):
         X_2d = viz_reducer.fit_transform(X_normalized)
         df['umap_x'] = X_2d[:, 0]
         df['umap_y'] = X_2d[:, 1]
-
+        df.to_csv('output.csv', index=False)
         return df
+
 
 
 
@@ -744,6 +756,9 @@ class BirdNetParser(BirdNetParserBase):
                     print(error_msg)
 
                 f_out.write("\n" + "=" * 50 + "\n\n")
+
+
+
 
             if all_embeddings:
                 print("\n--- Running Dimensionality Reduction & Clustering ---")
