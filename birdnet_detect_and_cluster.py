@@ -294,6 +294,64 @@ class BirdNetParser(BirdNetParserBase):
                     if gap_bytes and idx != len(group) - 1:
                         out_wf.writeframes(gap_bytes)
 
+    def _fetch_all_vectors(self, index, namespace=None, filter=None, batch_size=100):
+        """
+        Pulls all vectors (+ metadata) from a Pinecone namespace.
+        """
+        all_records = []
+        ids_to_fetch = []
+
+        target_namespace = namespace if namespace is not None else ""
+
+        # Step 1: Extract string IDs from ListResponse objects
+        for page in index.list(namespace=target_namespace):
+            # Handle ListResponse / dict containing 'vectors'
+            if hasattr(page, "vectors") and page.vectors:
+                # page.vectors is a list of objects/dicts like [{'id': '...'}, ...]
+                for vec in page.vectors:
+                    if isinstance(vec, dict):
+                        ids_to_fetch.append(vec.get("id"))
+                    elif hasattr(vec, "id"):
+                        ids_to_fetch.append(vec.id)
+                    elif isinstance(vec, str):
+                        ids_to_fetch.append(vec)
+            # Fallback if page directly yields a list/tuple of items
+            elif isinstance(page, (list, tuple)):
+                for item in page:
+                    if isinstance(item, str):
+                        ids_to_fetch.append(item)
+                    elif isinstance(item, dict) and "id" in item:
+                        ids_to_fetch.append(item["id"])
+                    elif hasattr(item, "id"):
+                        ids_to_fetch.append(item.id)
+
+        # Filter out any None values
+        ids_to_fetch = [i for i in ids_to_fetch if i]
+
+        print(f"Found {len(ids_to_fetch)} vector IDs — fetching in batches...")
+
+        if not ids_to_fetch:
+            return all_records
+
+        print(f"Sample clean ID: {repr(ids_to_fetch[0])}")  # Confirm clean string output
+
+        # Step 2: Fetch full records in batches
+        for i in range(0, len(ids_to_fetch), batch_size):
+            batch_ids = ids_to_fetch[i:i + batch_size]
+            response = index.fetch(ids=batch_ids, namespace=target_namespace)
+
+            for vec_id, record in response.vectors.items():
+                meta = record.metadata or {}
+                if filter and not all(meta.get(k) == v for k, v in filter.items()):
+                    continue
+                all_records.append({
+                    "id": vec_id,
+                    "values": record.values,
+                    "metadata": meta,
+                })
+
+        print(f"Retrieved {len(all_records)} vectors after filtering.")
+        return all_records
 
     def extract_embeddings_and_detect(self, file_path, analyzer):
         """
@@ -538,24 +596,52 @@ class BirdNetParser(BirdNetParserBase):
                 shutil.move(file_path, archive_dir)
         self.logger.info(str(c) + ' log files imported into archive directory named: ' + archive_stem)
 
-
-
-        # todo run birdnet embeddings TWICE on each file in this new batch
-        # first pass is at 1.5 overlap just to get the detection of each chunk
-        # second pass it at 0 overlap to store in pinecone including the detection metadata from 1st pass
-        # collect species detections into a file and carve up audio for each
-        # make metadata for each chunck
-        # upsert vectors into Pinecone
-
         self.extract_and_store(source_audio_dir=archive_dir, batch_start=first_file_datetime,
                                batch_end=last_file_datetime)
 
-        pass
+
+    def recluster(self, umap_params, umap_viz_params, hdbscan_params,
+                  index_name="chipbot-birdnet-24", only_unidentified=True):
+
+        pc = Pinecone(api_key=self.pinecone_key)  # instantiate once, store as an attribute
+        index = pc.Index(index_name)
+
+        desc = pc.describe_index(index_name)  # or index.describe_index_stats() depending on SDK version
+        print(desc)
+
+        filter_dict = {'embedding_model_version': self.birdnet_model_version}
+        if only_unidentified:
+            filter_dict["birdnet_label"] = "Unidentified/Ambient"
+
+        records = self._fetch_all_vectors(index,filter=filter_dict, namespace='__default__')
+        if not records:
+            print("No matching vectors found.")
+            return None
+
+        X = np.array([r["values"] for r in records])
+        df = pd.DataFrame([r["metadata"] for r in records])
+
+        norms = np.linalg.norm(X, axis=1, keepdims=True)
+        X_normalized = np.where(norms == 0, X, X / norms)
+
+        # Clustering-space UMAP — feeds HDBSCAN
+        X_umap = umap.UMAP(**umap_params).fit_transform(X_normalized)
+        clusterer = HDBSCAN(**hdbscan_params)
+        df['cluster'] = clusterer.fit_predict(X_umap)
+        df['cluster_probability'] = clusterer.probabilities_
+
+        # Separate viz-space UMAP — independent fit, purely for 2D plotting
+        X_2d = umap.UMAP(**umap_viz_params).fit_transform(X_normalized)
+        df['umap_x'] = X_2d[:, 0]
+        df['umap_y'] = X_2d[:, 1]
+
+        return df
 
 
-    def run_cluster_analysis(self, batch_id):
 
-        pass
+
+
+
 
 
     def run_pipeline(self):
