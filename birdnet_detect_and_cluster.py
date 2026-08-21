@@ -70,7 +70,7 @@ class BirdNetParser(BirdNetParserBase):
         self.analyze_file_group = analyze_file_group
         self.sqlserver_connection = sqlserver_connection
         self.pinecone_key = pinecone_key
-        self.birdnet_model_version = birdnet_model_versions
+        self.birdnet_model_version = birdnet_model_version
         BirdNetParserBase.__init__(self, logger=logger)
 
 
@@ -405,10 +405,11 @@ class BirdNetParser(BirdNetParserBase):
         return detections, np.array(valid_embeddings), chunks_metadata
 
 
-    def extract_and_store(self, source_audio_dir, index_name="chipbot-birdnet-24"):
+    def extract_and_store(self, source_audio_dir, batch_start, batch_end, index_name="chipbot-birdnet-24"):
         pc = Pinecone(api_key=self.pinecone_key)
         analyzer = Analyzer(custom_species_list_path=self.species_list_path)
         index = pc.Index(index_name)
+        #index.delete(delete_all=True, namespace="__default__")
 
         audio_files = natsort.natsorted(
             [f for f in source_audio_dir.iterdir() if f.suffix.lower() == ".wav"],
@@ -429,6 +430,8 @@ class BirdNetParser(BirdNetParserBase):
             # get all the location metadata from gps coordinates
             my_file_parts = file_path.stem.split("_")
             gps = my_file_parts[2], my_file_parts[3]
+            my_device = my_file_parts[0]
+            my_datetime = my_file_parts[1]
             utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
                                            params_values=gps, params='@lat=?, @long=?', logger=self.logger)
             site = utilities.run_sql_return_params()
@@ -450,14 +453,25 @@ class BirdNetParser(BirdNetParserBase):
                         "end_time": meta["end_time"],
                         "birdnet_label": meta["birdnet_label"],
                         "confidence": meta["confidence"],
-                        "region": region,
+                        "country": my_country,
+                        "region": my_region,
+                        "province": my_province,
+                        "municipality": my_municipality,
+                        "local": my_local,
+                        "site": my_site,
+                        'lat':  gps[0],
+                        'long' : gps[1],
+                        'device': my_device,
+                        'datetime': my_datetime,
                         "embedding_model_version": self.birdnet_model_version,
-                        "min_confidence_used": self.min_confidence
+                        "min_confidence_used": self.min_confidence,
+                        "batch_start": batch_start,
+                        "batch_end": batch_end
                     }
                 })
 
             # batch upsert, namespaced by region per your last question
-            index.upsert(vectors=vectors, namespace=region)
+            index.upsert(vectors=vectors)
 
             # archive the raw file the same way run_pipeline does today
             # (keep this part — you still want raw audio preserved)
@@ -533,7 +547,8 @@ class BirdNetParser(BirdNetParserBase):
         # make metadata for each chunck
         # upsert vectors into Pinecone
 
-        self.extract_and_store(source_audio_dir=archive_dir)
+        self.extract_and_store(source_audio_dir=archive_dir, batch_start=first_file_datetime,
+                               batch_end=last_file_datetime)
 
         pass
 
