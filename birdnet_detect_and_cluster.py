@@ -372,23 +372,20 @@ class BirdNetParser(BirdNetParserBase):
                 kwargs['experimental_preserve_all_tensors'] = True
                 super().__init__(*args, **kwargs)
 
-        # Apply the patch right before instantiating the embedding engine
         tf.lite.Interpreter = EmbeddingSafeInterpreter
 
         try:
-            # Moving the instantiation HERE forces the embedding engine to preserve intermediate layers
             embedding_analyzer = Analyzer()
-            embedding_recording = Recording(analyzer=embedding_analyzer, path=str(file_path))
+            embedding_overlap = 0.0  # explicit: embeddings pass uses no overlap
+            embedding_recording = Recording(analyzer=embedding_analyzer, path=str(file_path), overlap=embedding_overlap)
             embedding_recording.analyze()
             embedding_recording.extract_embeddings()
 
-            raw_embeddings = embedding_recording.embeddings  # List of raw tensors/dicts in TF 2.16+
+            raw_embeddings = embedding_recording.embeddings
             chunks = embedding_recording.chunks
         finally:
-            # IMMEDIATELY restore the original interpreter to keep the environment clean
             tf.lite.Interpreter = original_interpreter
 
-            # --- Clean the extracted dictionary arrays (TF 2.16+ wrapper fix) ---
             cleaned_embeddings = []
             for emb in raw_embeddings:
                 if emb is None:
@@ -396,78 +393,74 @@ class BirdNetParser(BirdNetParserBase):
                     continue
 
                 try:
-                    # 1. If it's a TensorFlow EagerTensor (has .numpy() method)
                     if hasattr(emb, 'numpy'):
                         cleaned_embeddings.append(emb.numpy().flatten())
-
-                    # 2. If it's a dictionary (older BirdNET-Analyzer formats)
                     elif isinstance(emb, dict):
-                        # Try getting 'array', fallback to 'embeddings', or the first value
                         val = emb.get('array') or emb.get('embeddings') or list(emb.values())[0]
                         cleaned_embeddings.append(np.asarray(val).flatten())
-
-                    # 3. If it's already a numpy array
                     elif isinstance(emb, np.ndarray):
                         cleaned_embeddings.append(emb.flatten())
-
-                    # 4. Fallback: Try converting lists, tuples, or any other iterable directly
                     else:
                         arr = np.asarray(emb)
                         if arr.size > 0:
                             cleaned_embeddings.append(arr.flatten())
                         else:
                             cleaned_embeddings.append(None)
-
                 except Exception as e:
-                    # If coercion fails for a specific chunk, log it and keep going
                     print(f"   [Warning] Failed to parse embedding element: {e}")
                     cleaned_embeddings.append(None)
 
         chunks_metadata = []
 
-        # Map chunks to detections
-        step = 3.0 - self.overlap  # window duration minus overlap
+        embedding_step = 3.0 - embedding_overlap  # = 3.0, matches actual embedding chunk spacing
+
         for i, chunk in enumerate(chunks):
-            start_time = i * step
+            start_time = i * embedding_step
             end_time = start_time + 3.0
 
-            # Pull the matching 1024-D vector
             feat_vector = cleaned_embeddings[i] if i < len(cleaned_embeddings) else None
             if feat_vector is None or feat_vector.shape[0] != 1024:
                 continue
 
-            # Look for custom-filtered detections in this 3-second window
             chunk_detections = [
                 d for d in detections
                 if abs(d['start_time'] - start_time) < 1.5
             ]
 
-            label = "Unidentified/Ambient"
-            confidence = 0.0
+            if len(chunk_detections) > 1:
+                species_list = ", ".join(d['common_name'] for d in chunk_detections)
+                print(f"   [Overlap] Chunk {i} ({start_time:.1f}s-{end_time:.1f}s): "
+                      f"{len(chunk_detections)} detections -> {species_list}")
+
             if chunk_detections:
-                best_det = max(chunk_detections, key=lambda x: x['confidence'])
-                label = f"{best_det['common_name']} ({best_det['scientific_name']})"
-                confidence = best_det['confidence']
+                labels = [f"{d['common_name']} ({d['scientific_name']})" for d in chunk_detections]
+                confidences = [d['confidence'] for d in chunk_detections]
+                top_det = max(chunk_detections, key=lambda x: x['confidence'])
+            else:
+                labels = ["Unidentified/Ambient"]
+                confidences = [0.0]
+                top_det = None
 
             chunks_metadata.append({
                 "file": file_path.name,
                 "start_time": start_time,
                 "end_time": end_time,
-                "birdnet_label": label,
-                "confidence": confidence
+                "birdnet_labels": labels,  # list of ALL species in this chunk
+                "confidences": confidences,  # matching list of confidences
+                "birdnet_label": labels[0],  # kept for convenience/back-compat: top or only label
+                "confidence": confidences[0] if top_det is None else top_det['confidence'],
+                "num_species": len(labels)
             })
 
-        # Filter out any None values from the final array to prevent stacking errors downstream
         valid_embeddings = [e for e in cleaned_embeddings if e is not None and e.shape[0] == 1024]
 
         return detections, np.array(valid_embeddings), chunks_metadata
-
 
     def extract_and_store(self, source_audio_dir, batch_start, batch_end, index_name="chipbot-birdnet-24"):
         pc = Pinecone(api_key=self.pinecone_key)
         analyzer = Analyzer(custom_species_list_path=self.species_list_path)
         index = pc.Index(index_name)
-        #index.delete(delete_all=True, namespace="__default__")
+        # index.delete(delete_all=True, namespace="__default__")
 
         detection_file_path = source_audio_dir / f"detection_results.txt"
 
@@ -517,6 +510,7 @@ class BirdNetParser(BirdNetParserBase):
                 my_province = my_locations['province'].replace(' ', '-')
                 my_municipality = my_locations['municipality'].replace(' ', '-')
                 my_local = my_locations['local'].replace(' ', '-')
+
                 vectors = []
                 for i, (emb, meta) in enumerate(zip(embeddings, metadata)):
                     vectors.append({
@@ -527,15 +521,18 @@ class BirdNetParser(BirdNetParserBase):
                             "chunk_start": meta["start_time"],
                             "chunk_end": meta["end_time"],
                             "birdnet_label": meta["birdnet_label"],
+                            # top/only species, for simple exact-match filtering
+                            "birdnet_labels": meta["birdnet_labels"],  # full list, for $in-style filtering
                             "confidence": meta["confidence"],
+                            "num_species": meta["num_species"],
                             "country": my_country,
                             "region": my_region,
                             "province": my_province,
                             "municipality": my_municipality,
                             "local": my_local,
                             "site": my_site,
-                            'lat':  gps[0],
-                            'long' : gps[1],
+                            'lat': gps[0],
+                            'long': gps[1],
                             'device': my_device,
                             'datetime': my_datetime,
                             "embedding_model_version": self.birdnet_model_version,
