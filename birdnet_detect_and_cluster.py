@@ -521,8 +521,7 @@ class BirdNetParser(BirdNetParserBase):
                             "chunk_start": meta["start_time"],
                             "chunk_end": meta["end_time"],
                             "birdnet_label": meta["birdnet_label"],
-                            # top/only species, for simple exact-match filtering
-                            "birdnet_labels": meta["birdnet_labels"],  # full list, for $in-style filtering
+                            "birdnet_labels": meta["birdnet_labels"],
                             "confidence": meta["confidence"],
                             "num_species": meta["num_species"],
                             "country": my_country,
@@ -607,8 +606,7 @@ class BirdNetParser(BirdNetParserBase):
                                batch_end=last_file_datetime)
 
 
-    def recluster(self, umap_params, umap_viz_params, hdbscan_params,
-                  index_name="chipbot-birdnet-24", only_unidentified=True):
+    def clusterer(self, batch=(str, str, str), index_name="chipbot-birdnet-24", only_unidentified=True):
 
         pc = Pinecone(api_key=self.pinecone_key)  # instantiate once, store as an attribute
         index = pc.Index(index_name)
@@ -619,6 +617,10 @@ class BirdNetParser(BirdNetParserBase):
         filter_dict = {'embedding_model_version': self.birdnet_model_version}
         if only_unidentified:
             filter_dict["birdnet_label"] = "Unidentified/Ambient"
+        if batch:
+            filter_dict["site"] = batch[0]
+            filter_dict['batch_start'] = batch[1]
+            filter_dict['batch_end'] = batch[2]
 
         records = self._fetch_all_vectors(index,filter=filter_dict, namespace='__default__')
         if not records:
