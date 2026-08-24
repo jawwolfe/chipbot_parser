@@ -17,6 +17,7 @@ from mu_utilities.exceptions import DatabaseOperationException
 from exceptions import RawAudioBatchException
 from pinecone import Pinecone
 from operator import itemgetter
+import soundfile as sf
 
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 
@@ -183,13 +184,18 @@ class BirdNetParser(BirdNetParserBase):
             print(f"An error occurred: {e}")
             return None
 
-    def get_wav_duration(self, file_path: str) -> float:
-        with wave.open(file_path, 'rb') as wav_file:
-            frames = wav_file.getnframes()
-            rate = wav_file.getframerate()
-            duration_seconds = frames / float(rate)
+    def get_wav_duration(self, file_path: str | Path) -> float:
+        path_obj = Path(file_path)
 
-        return duration_seconds
+        if not path_obj.exists() or path_obj.stat().st_size == 0:
+            return 0.0
+
+        try:
+            info = sf.info(str(path_obj))
+            return float(info.duration)
+        except Exception:
+            # Handles sf.LibsndfileError, corrupt headers, or unrecognized formats
+            return 0.0
 
     def read_rows(self, csv_path):
         rows = []
@@ -612,7 +618,6 @@ class BirdNetParser(BirdNetParserBase):
             for batch in files_log:
                 for item_log in batch:
                     if item_log['Filename'] == item_file.stem:
-                        print(item_log['Filename'])
                         flag = True
             if not flag:
                 print("Audio file in log missing from external drive.")
@@ -622,7 +627,6 @@ class BirdNetParser(BirdNetParserBase):
             # remember to check for 0 length file and ignore
             # lack of temp and battery and humidity data should correspond to zero length audio file to delete
             # create batch archive directory and move files
-
 
             # note that all files in a batch (one log file) have same gps coordinates first is same as all files
             # so here we handle site, location and batch at this level
@@ -658,58 +662,54 @@ class BirdNetParser(BirdNetParserBase):
                                            params_values=location_params, params='@Level1=?, @Level2=?, @Level3=?, '
                                                                                  '@Level4=?, @Level5=?, @SiteID=?',
                                            logger=self.logger)
-            location_id = utilities.run_sql_return_params()
-            batch_params = (my_file_parts[0], gps, location_id, first_timestamp, last_timestamp)
-            utilities = SQLServerUtilities(sp='sp_get_insert_batch',
-                                           sql_server_connection=self.sqlserver_connection,
-                                           params_values=batch_params, params='@DeviceName=?, @GpsCoordinates=?, '
+            location_id = utilities.run_sql_return_params()[0][0]
+
+            lon = gps[1]
+            lat = gps[0]
+            gps_wkt = f"POINT({lon} {lat})"
+            batch_params = (my_file_parts[0], gps_wkt, location_id, first_timestamp, last_timestamp)
+            utilities = SQLServerUtilities(sp='sp_get_insert_batch', sql_server_connection=self.sqlserver_connection,
+                                           params_values=batch_params, params='@DeviceName=?, @GpsCoordinatesText=?, '
                                                                               '@LocationID=?, @BatchStart=?, '
-                                                                              '@BatchEnd=?',
-                                           logger=self.logger)
-            batch_id = utilities.run_sql_return_params()
+                                                                              '@BatchEnd=?', logger=self.logger)
+            batch_id = utilities.run_sql_return_params()[0][0]
             my_site_name = site_data[0][1].replace(' ', '-')
             my_country = my_locations['country'].replace(' ', '-')
             my_province = my_locations['province'].replace(' ', '-')
+            archive_stem = (my_country + "_" + my_province + "_" + my_site_name + '_' +
+                            first_timestamp + "_" + last_timestamp)
+            archive_dir = Path(self.audio_path) / Path(archive_stem)
+            archive_dir.mkdir(parents=True, exist_ok=True)
 
             for log_file in batch:
                 c += 1
+                log_file_path = Path(self.external_drive) / Path(log_file['Filename'] + ".wav")
+                file_split = log_file_path.stem.split("_")
+                file_length = self.get_wav_duration(log_file_path)
+                file_params = (batch_id, log_file['Filename'], log_file['Temp'], log_file['Hum'], log_file['Bat'],
+                               file_split[1], file_length)
+                utilities = SQLServerUtilities(sp='sp_get_insert_file',
+                                               sql_server_connection=self.sqlserver_connection,
+                                               params_values=file_params, params='@BatchID=?, @FileFullName=?, '
+                                                                                  '@Temp=?, @Humidity=?, @Battery=?, '
+                                                                                  '@DatetimeStart=?, @Length=?',
+                                               logger=self.logger)
+                # todo this doesn't hit
+                if file_length == '0.0':
+                    # delete file
+                    log_file_path.unlink(missing_ok=True)
+                else:
+                    file_id = utilities.run_sql_return_params()[0][0]
+                    # move file to archive
+                    shutil.move(log_file_path, archive_dir)
+            # todo move the log file to archive
 
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-        archive_stem = (my_country + "_" + my_province + "_" + my_site + '_' +
-                        first_file_datetime + "_" + last_file_datetime)
-        archive_dir = Path(self.audio_path) / Path(archive_stem)
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        for file_path in audio_files_ext:
-            if file_path.is_file():
-                shutil.move(file_path, archive_dir)
-        self.logger.info(str(c) + ' raw files imported into archive directory named: ' + archive_stem)
-        c = 0
-
-        for file_path in log_files_ext:
-            if file_path.is_file():
-                c += 1
-                shutil.move(file_path, archive_dir)
-        self.logger.info(str(c) + ' log files imported into archive directory named: ' + archive_stem)
-
-        self.extract_and_store(source_audio_dir=archive_dir, batch_start=first_file_datetime,
-                               batch_end=last_file_datetime)
+        #self.extract_and_store(source_audio_dir=archive_dir, batch_start=first_file_datetime,
+        #                       batch_end=last_file_datetime)'''
 
 
     def clusterer(self, batch=(str, str, str), index_name="chipbot-birdnet-24", only_unidentified=True):
