@@ -13,8 +13,10 @@ import shutil, os, csv, sys, wave, re
 from collections import defaultdict
 import requests
 from mu_utilities.utilities import SQLServerUtilities
+from mu_utilities.exceptions import DatabaseOperationException
 from exceptions import RawAudioBatchException
 from pinecone import Pinecone
+from operator import itemgetter
 
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 
@@ -180,6 +182,14 @@ class BirdNetParser(BirdNetParserBase):
         except Exception as e:
             print(f"An error occurred: {e}")
             return None
+
+    def get_wav_duration(self, file_path: str) -> float:
+        with wave.open(file_path, 'rb') as wav_file:
+            frames = wav_file.getnframes()
+            rate = wav_file.getframerate()
+            duration_seconds = frames / float(rate)
+
+        return duration_seconds
 
     def read_rows(self, csv_path):
         rows = []
@@ -594,6 +604,7 @@ class BirdNetParser(BirdNetParserBase):
             msg = f"No matching audio (.wav) files found in external_drive: {self.external_drive}"
             self.logger.error(msg)
             raise FileNotFoundError(msg)
+
         audio_files_ext = natsort.natsorted(audio_files_ext, key=lambda x: str(x))
         # quality check the log file against all the audio files in the directory
         for item_file in audio_files_ext:
@@ -605,56 +616,82 @@ class BirdNetParser(BirdNetParserBase):
                         flag = True
             if not flag:
                 print("Audio file in log missing from external drive.")
-        # use log to process files
+
+
         for batch in files_log:
-            # each batch has same gps coordinates so one location and site per batch
             # remember to check for 0 length file and ignore
             # lack of temp and battery and humidity data should correspond to zero length audio file to delete
-            # lookup site and locations then enter batch
-            # catch pyodbc.IntegrityError (sqlserver 2601 or 2627) if already exists then skip if I rerun it.
-
-            pass
-
-        expected_value = None
-        gps = None
-        c = 0
+            # create batch archive directory and move files
 
 
-
-        for raw_file in audio_files_ext:
-            c += 1
-            my_file_parts = raw_file.stem.split("_")
+            # note that all files in a batch (one log file) have same gps coordinates first is same as all files
+            # so here we handle site, location and batch at this level
+            c = 0
+            sorted_data = sorted(batch, key=lambda x: x['Filename'])
+            first_dict = sorted_data[0]
+            last_dict = sorted_data[-1]
+            first_timestamp = first_dict['Filename'].split('_')[-3]
+            last_timestamp = last_dict['Filename'].split('_')[-3]
+            my_file_parts = first_dict['Filename'].split("_")
             gps = my_file_parts[2], my_file_parts[3]
             if gps == ('0.000000', '0.000000'):
-                msg = f"This file's GPS coordinates are not known: {raw_file.stem}\n"
+                msg = f"This file's GPS coordinates are not known: {first_dict['Filename']}. Attempt to use hard coded.\n"
+                self.logger.error(msg)
                 if DEFAULT_LAT != '0.000000' and DEFAULT_LONG != '0.000000':
                     gps = (DEFAULT_LAT, DEFAULT_LONG)
-                self.logger.error(msg)
-            utilities = SQLServerUtilities(sp='sp_get_site_by_coordinates', sql_server_connection=self.sqlserver_connection,
+                    # todo update the file name with the coordinates hard coded in constants
+
+            utilities = SQLServerUtilities(sp='sp_get_site_by_coordinates',
+                                           sql_server_connection=self.sqlserver_connection,
                                            params_values=gps, params='@Latitude=?, @Longitude=?', logger=self.logger)
-            current_value = utilities.run_sql_return_params()
-            if not current_value:
-                msg = f"This file's GPS coordinates cant not be found in an existing site: {raw_file.stem}\n"
-                msg += f"GPS coordinates of missing or different site:\n{gps}\n"
-                self.logger.error(msg)
-                raise RawAudioBatchException(msg)
-            if expected_value is None:
-                expected_value = current_value
-            elif current_value != expected_value:
-                # Throw an error immediately if a mismatch occurs
-                msg = f"Multiple sites or no site found\n" + str(raw_file) + "\nExpected: {expected_value}\nActual: {current_value}\n"
-                msg += f"GPS coordinates of missing or different site:\n{gps}\n"
+            site_data = utilities.run_sql_return_params()
+            if not site_data:
+                msg = f"This file's GPS coordinates cant not be found in an existing site: {first_dict['Filename']}\n"
                 self.logger.error(msg)
                 raise RawAudioBatchException(msg)
 
-        first_file_name = audio_files_ext[0].stem
-        first_file_datetime = first_file_name.split("_")[-3]
-        last_file_name = audio_files_ext[-1].stem
-        last_file_datetime = last_file_name.split("_")[-3]
-        my_locations = self.get_regions(gps)
-        my_site = expected_value[0][0].replace(' ', '-')
-        my_country = my_locations['country'].replace(' ', '-')
-        my_province = my_locations['province'].replace(' ', '-')
+            my_locations = self.get_regions(gps)
+            location_params = (my_locations['country'], my_locations['region'], my_locations['province'],
+                               my_locations['municipality'], my_locations['local'], site_data[0][0])
+            utilities = SQLServerUtilities(sp='sp_get_insert_location',
+                                           sql_server_connection=self.sqlserver_connection,
+                                           params_values=location_params, params='@Level1=?, @Level2=?, @Level3=?, '
+                                                                                 '@Level4=?, @Level5=?, @SiteID=?',
+                                           logger=self.logger)
+            location_id = utilities.run_sql_return_params()
+            batch_params = (my_file_parts[0], gps, location_id, first_timestamp, last_timestamp)
+            utilities = SQLServerUtilities(sp='sp_get_insert_batch',
+                                           sql_server_connection=self.sqlserver_connection,
+                                           params_values=batch_params, params='@DeviceName=?, @GpsCoordinates=?, '
+                                                                              '@LocationID=?, @BatchStart=?, '
+                                                                              '@BatchEnd=?',
+                                           logger=self.logger)
+            batch_id = utilities.run_sql_return_params()
+            my_site_name = site_data[0][1].replace(' ', '-')
+            my_country = my_locations['country'].replace(' ', '-')
+            my_province = my_locations['province'].replace(' ', '-')
+
+            for log_file in batch:
+                c += 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
         archive_stem = (my_country + "_" + my_province + "_" + my_site + '_' +
                         first_file_datetime + "_" + last_file_datetime)
         archive_dir = Path(self.audio_path) / Path(archive_stem)
