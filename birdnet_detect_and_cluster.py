@@ -21,6 +21,9 @@ from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse
 FILE_PREFIX = "cluster_"
 MAX_SPECIES_NAME_LENGTH = 120
 IGNORED_LABEL = "unidentified/ambient"
+DEFAULT_LAT = '39.8755985'
+DEFAULT_LONG = '-86.2844157'
+
 
 class BirdNetParserBase:
     def __init__(self, logger):
@@ -73,6 +76,40 @@ class BirdNetParser(BirdNetParserBase):
         self.birdnet_model_version = birdnet_model_version
         BirdNetParserBase.__init__(self, logger=logger)
 
+    def parse_log(self, path):
+        with open(path, 'r') as f:
+            text = f.read()
+
+        lines = text.splitlines()
+
+        entries = []
+        last_reading = None
+
+        temp_re = re.compile(r'Temp:\s*([\-\d.]+)\s*°C\s*\|\s*Hum:\s*([\-\d.]+)\s*%\s*\|\s*Bat:\s*([\-\d.]+)')
+        file_re = re.compile(r'^/?([a-zA-Z]{2}-chipbot-[^\s]+)\.wav')
+
+        for line in lines:
+            line = line.strip()
+            m = temp_re.search(line)
+            if m:
+                last_reading = {
+                    'Temp': m.group(1),
+                    'Hum': m.group(2),
+                    'Bat': m.group(3),
+                }
+                continue
+
+            m = file_re.match(line)
+            if m and last_reading is not None:
+                filename = m.group(1)
+                entries.append({
+                    'Filename': filename,
+                    'Temp': last_reading['Temp'],
+                    'Hum': last_reading['Hum'],
+                    'Bat': last_reading['Bat'],
+                })
+
+        return entries
 
     def get_regions(self, gps_coordinates):
         lat, lon = gps_coordinates
@@ -546,6 +583,11 @@ class BirdNetParser(BirdNetParserBase):
 
     def import_file_batch(self):
         self.logger.info("Begin script importing embedding files.")
+        log_extensions = {".txt"}
+        log_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in log_extensions]
+        files_log = []
+        for log_file in log_files_ext:
+            files_log.append(self.parse_log(log_file))
         audio_extensions = {".wav"}
         audio_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in audio_extensions]
         if not audio_files_ext:
@@ -553,15 +595,43 @@ class BirdNetParser(BirdNetParserBase):
             self.logger.error(msg)
             raise FileNotFoundError(msg)
         audio_files_ext = natsort.natsorted(audio_files_ext, key=lambda x: str(x))
+        # quality check the log file against all the audio files in the directory
+        for item_file in audio_files_ext:
+            flag = False
+            for batch in files_log:
+                for item_log in batch:
+                    if item_log['Filename'] == item_file.stem:
+                        print(item_log['Filename'])
+                        flag = True
+            if not flag:
+                print("Audio file in log missing from external drive.")
+        # use log to process files
+        for batch in files_log:
+            # each batch has same gps coordinates so one location and site per batch
+            # remember to check for 0 length file and ignore
+            # lack of temp and battery and humidity data should correspond to zero length audio file to delete
+            # lookup site and locations then enter batch
+            # catch pyodbc.IntegrityError (sqlserver 2601 or 2627) if already exists then skip if I rerun it.
+
+            pass
+
         expected_value = None
         gps = None
         c = 0
+
+
+
         for raw_file in audio_files_ext:
             c += 1
             my_file_parts = raw_file.stem.split("_")
             gps = my_file_parts[2], my_file_parts[3]
-            utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
-                                           params_values=gps, params='@lat=?, @long=?', logger=self.logger)
+            if gps == ('0.000000', '0.000000'):
+                msg = f"This file's GPS coordinates are not known: {raw_file.stem}\n"
+                if DEFAULT_LAT != '0.000000' and DEFAULT_LONG != '0.000000':
+                    gps = (DEFAULT_LAT, DEFAULT_LONG)
+                self.logger.error(msg)
+            utilities = SQLServerUtilities(sp='sp_get_site_by_coordinates', sql_server_connection=self.sqlserver_connection,
+                                           params_values=gps, params='@Latitude=?, @Longitude=?', logger=self.logger)
             current_value = utilities.run_sql_return_params()
             if not current_value:
                 msg = f"This file's GPS coordinates cant not be found in an existing site: {raw_file.stem}\n"
@@ -594,8 +664,7 @@ class BirdNetParser(BirdNetParserBase):
                 shutil.move(file_path, archive_dir)
         self.logger.info(str(c) + ' raw files imported into archive directory named: ' + archive_stem)
         c = 0
-        log_extensions = {".txt"}
-        log_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in log_extensions]
+
         for file_path in log_files_ext:
             if file_path.is_file():
                 c += 1

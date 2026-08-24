@@ -3,10 +3,9 @@ from configs import config
 from pathlib import Path
 from ml_parameters.ml_parameters import UMAPParams, HDBSCANClusters
 from connection import SQLServerConnection
-import os, datetime, logging
+import datetime, logging
 
-dir_path = os.getcwd()
-APP_NAME = dir_path[dir_path.rindex('/')+1:]
+
 LOG_FILE_PATH = config.LOG_FILE_PATH
 LOG_MESSAGE = '%(asctime)s -%(process)d - %(levelname)s - %(message)s'
 LOG_TIME = '%d-%b-%y %H:%M:%S'
@@ -42,7 +41,7 @@ PINECONE_KEY = config.PINECONE_KEY
 BIRDNET_MODEL_VERSION = config.BIRDNET_MODEL_VERSION
 
 
-def initialize_logger(directory):
+def initialize_logger():
     full_path = LOG_FILE_PATH + '/' + datetime.datetime.now().strftime("%Y-%m-%d") + '.log'
     global_format = logging.Formatter(LOG_MESSAGE, LOG_TIME)
     logger = logging.getLogger()
@@ -62,7 +61,6 @@ def initialize_umap():
 def initialize_umap_viz():
     umap_params_viz = UMAPParams(n_neighbors=N_NEIGHBORS_VIZ, min_distance=MIN_DISTANCE_VIZ,
                                  random_state=RANDOM_STATE_VIZ, n_components=N_COMPONENTS_VIZ, metric=NMAP_METRIC_VIZ)
-
     return umap_params_viz
 
 
@@ -78,7 +76,7 @@ def initialize_sqlserver():
     return sqlserver_connection
 
 
-parse = BirdNetParser(logger=initialize_logger('chipbot_parser'), audio_path=AUDIO_PATH, output_path=OUTPUT_PATH,
+parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_path=OUTPUT_PATH,
                       min_confidence=MIN_CONFIDENCE, species_list=SPECIES_LIST,
                       external_drive=EXTERNAL_DRIVE,
                       gap_ms=GAP_MS, umap=initialize_umap(), umap_viz=initialize_umap_viz(),
@@ -89,5 +87,5 @@ parse = BirdNetParser(logger=initialize_logger('chipbot_parser'), audio_path=AUD
 
 #parse.extract_and_store(source_audio_dir=AUDIO_PATH / "United-States_Indiana_Indianapolis-House-Backyard_2026-07-17-200624_2026-07-18-082620",
 #                        index_name="chipbot-birdnet-24", batch_start='2026-07-17-200624', batch_end='2026-07-18-082620')
-parse.clusterer(batch=('Indianapolis-House-Backyard', '2026-07-17-200624', '2026-07-18-082620'))
-#parse.import_file_batch()
+#parse.clusterer(batch=('Indianapolis-House-Backyard', '2026-07-17-200624', '2026-07-18-082620'))
+parse.import_file_batch()
