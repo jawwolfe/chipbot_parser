@@ -637,7 +637,16 @@ class BirdNetParser(BirdNetParserBase):
                 self.logger.error(msg)
                 if DEFAULT_LAT != '0.000000' and DEFAULT_LONG != '0.000000':
                     gps = (DEFAULT_LAT, DEFAULT_LONG)
-                    # todo update the file name with the coordinates hard coded in constants
+                for old_file_name in batch['data']:
+                    old_name_path = self.external_drive / Path(old_file_name['Filename'] + ".wav")
+                    new_filename = old_name_path.name.replace("0.000000", gps[0], 1).replace(
+                        "0.000000", gps[1], 1)
+                    new_name_path = old_name_path.with_name(new_filename)
+                    if old_name_path.exists():
+                        shutil.move(old_name_path, new_name_path)
+                        print(f"Successfully renamed to: {new_name_path}")
+                    else:
+                        print(f"Error: Source file does not exist: {old_name_path}")
 
             utilities = SQLServerUtilities(sp='sp_get_site_by_coordinates',
                                            sql_server_connection=self.sqlserver_connection,
@@ -677,10 +686,13 @@ class BirdNetParser(BirdNetParserBase):
 
             for log_file in batch['data']:
                 c += 1
-                wav_file_path = Path(self.external_drive) / Path(log_file['Filename'] + ".wav")
+                # handle case when gps coordinates where 0.000000 then replaced with defaults
+                new_filename = log_file['Filename'].replace("0.000000", gps[0], 1).replace(
+                    "0.000000", gps[1], 1)
+                wav_file_path = Path(self.external_drive) / Path(new_filename + ".wav")
                 file_split = wav_file_path.stem.split("_")
                 file_length = self.get_wav_duration(wav_file_path)
-                file_params = (batch_id, log_file['Filename'], log_file['Temp'], log_file['Hum'], log_file['Bat'],
+                file_params = (batch_id, new_filename, log_file['Temp'], log_file['Hum'], log_file['Bat'],
                                file_split[1], file_length)
                 utilities = SQLServerUtilities(sp='sp_get_insert_file',
                                                sql_server_connection=self.sqlserver_connection,
