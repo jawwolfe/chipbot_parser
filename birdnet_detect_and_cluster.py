@@ -80,39 +80,37 @@ class BirdNetParser(BirdNetParserBase):
         BirdNetParserBase.__init__(self, logger=logger)
 
     def parse_log(self, path):
-        with open(path, 'r') as f:
+        with open(path, "r") as f:
             text = f.read()
-
         lines = text.splitlines()
-
         entries = []
         last_reading = None
-
-        temp_re = re.compile(r'Temp:\s*([\-\d.]+)\s*°C\s*\|\s*Hum:\s*([\-\d.]+)\s*%\s*\|\s*Bat:\s*([\-\d.]+)')
-        file_re = re.compile(r'^/?([a-zA-Z]{2}-chipbot-[^\s]+)\.wav')
-
+        temp_re = re.compile(
+            r"Temp:\s*([\-\d.]+)\s*°C\s*\|\s*Hum:\s*([\-\d.]+)\s*%\s*\|\s*Bat:\s*([\-\d.]+)"
+        )
+        file_re = re.compile(r"^/?([a-zA-Z]{2}-chipbot-[^\s]+)\.wav")
         for line in lines:
             line = line.strip()
             m = temp_re.search(line)
             if m:
                 last_reading = {
-                    'Temp': m.group(1),
-                    'Hum': m.group(2),
-                    'Bat': m.group(3),
+                    "Temp": m.group(1),
+                    "Hum": m.group(2),
+                    "Bat": m.group(3),
                 }
                 continue
-
             m = file_re.match(line)
             if m and last_reading is not None:
                 filename = m.group(1)
                 entries.append({
-                    'Filename': filename,
-                    'Temp': last_reading['Temp'],
-                    'Hum': last_reading['Hum'],
-                    'Bat': last_reading['Bat'],
+                    "Filename": filename,
+                    "Temp": last_reading["Temp"],
+                    "Hum": last_reading["Hum"],
+                    "Bat": last_reading["Bat"],
                 })
-
-        return entries
+        logfilename = os.path.basename(path)
+        # Return as a list containing the single log entry dictionary
+        return [{"logfilename": logfilename, "data": entries}]
 
     def get_regions(self, gps_coordinates):
         lat, lon = gps_coordinates
@@ -601,9 +599,10 @@ class BirdNetParser(BirdNetParserBase):
         self.logger.info("Begin script importing embedding files.")
         log_extensions = {".txt"}
         log_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in log_extensions]
-        files_log = []
+        log_files_ext_data = []
         for log_file in log_files_ext:
-            files_log.append(self.parse_log(log_file))
+            log_files_ext_data.extend(self.parse_log(log_file))
+        log_files_ext_data.sort(key=lambda entry: entry["logfilename"])
         audio_extensions = {".wav"}
         audio_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in audio_extensions]
         if not audio_files_ext:
@@ -615,23 +614,18 @@ class BirdNetParser(BirdNetParserBase):
         # quality check the log file against all the audio files in the directory
         for item_file in audio_files_ext:
             flag = False
-            for batch in files_log:
-                for item_log in batch:
+            for batch in log_files_ext_data:
+                for item_log in batch['data']:
                     if item_log['Filename'] == item_file.stem:
                         flag = True
             if not flag:
                 print("Audio file in log missing from external drive.")
 
-
-        for batch in files_log:
-            # remember to check for 0 length file and ignore
-            # lack of temp and battery and humidity data should correspond to zero length audio file to delete
-            # create batch archive directory and move files
-
+        for batch in log_files_ext_data:
             # note that all files in a batch (one log file) have same gps coordinates first is same as all files
             # so here we handle site, location and batch at this level
             c = 0
-            sorted_data = sorted(batch, key=lambda x: x['Filename'])
+            sorted_data = sorted(batch['data'], key=lambda x: x['Filename'])
             first_dict = sorted_data[0]
             last_dict = sorted_data[-1]
             first_timestamp = first_dict['Filename'].split('_')[-3]
@@ -681,11 +675,11 @@ class BirdNetParser(BirdNetParserBase):
             archive_dir = Path(self.audio_path) / Path(archive_stem)
             archive_dir.mkdir(parents=True, exist_ok=True)
 
-            for log_file in batch:
+            for log_file in batch['data']:
                 c += 1
-                log_file_path = Path(self.external_drive) / Path(log_file['Filename'] + ".wav")
-                file_split = log_file_path.stem.split("_")
-                file_length = self.get_wav_duration(log_file_path)
+                wav_file_path = Path(self.external_drive) / Path(log_file['Filename'] + ".wav")
+                file_split = wav_file_path.stem.split("_")
+                file_length = self.get_wav_duration(wav_file_path)
                 file_params = (batch_id, log_file['Filename'], log_file['Temp'], log_file['Hum'], log_file['Bat'],
                                file_split[1], file_length)
                 utilities = SQLServerUtilities(sp='sp_get_insert_file',
@@ -694,20 +688,18 @@ class BirdNetParser(BirdNetParserBase):
                                                                                   '@Temp=?, @Humidity=?, @Battery=?, '
                                                                                   '@DatetimeStart=?, @Length=?',
                                                logger=self.logger)
-                # todo this doesn't hit
-                if file_length == '0.0':
+                if file_length == 0.0:
                     # delete file
-                    log_file_path.unlink(missing_ok=True)
+                    wav_file_path.unlink(missing_ok=True)
                 else:
                     file_id = utilities.run_sql_return_params()[0][0]
                     # move file to archive
-                    shutil.move(log_file_path, archive_dir)
-            # todo move the log file to archive
+                    shutil.move(wav_file_path, archive_dir)
+            log_file_path = self.external_drive / Path(batch['logfilename'])
+            shutil.move(self.external_drive / log_file_path, archive_dir)
 
 
-
-
-
+        pass
         #self.extract_and_store(source_audio_dir=archive_dir, batch_start=first_file_datetime,
         #                       batch_end=last_file_datetime)'''
 
