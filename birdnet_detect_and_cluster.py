@@ -9,7 +9,7 @@ import umap
 from sklearn.cluster import HDBSCAN
 from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
-import shutil, os, csv, sys, wave, re
+import shutil, os, csv, sys, wave, re, json
 from collections import defaultdict
 import requests
 from mu_utilities.utilities import SQLServerUtilities
@@ -18,7 +18,7 @@ from exceptions import RawAudioBatchException
 from pinecone import Pinecone
 from operator import itemgetter
 import soundfile as sf
-
+import pyodbc
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 
 FILE_PREFIX = "cluster_"
@@ -507,11 +507,69 @@ class BirdNetParser(BirdNetParserBase):
 
         return detections, np.array(valid_embeddings), chunks_metadata
 
+    def insert_chunk(self, chunk_rows):
+        connection_string = "Driver={ODBC Driver 18 for SQL Server};"
+        connection_string += "TrustServerCertificate=yes;"
+        connection_string += "Server=" + self.sqlserver_connection.name + ";"
+        connection_string += "Database=" + self.sqlserver_connection.database + ";"
+        connection_string += "UID=" + self.sqlserver_connection.username + ";"
+        connection_string += "PWD=" + '3ZGmpRkiPsCv' + ";"
+
+        insert_sql = "INSERT INTO Chunks (ChunkID, FileName, StartSample, EndSample, ChunkIndex) VALUES (?, ?, ?, ?, ?)"
+        conn = pyodbc.connect(connection_string)
+        cursor = conn.cursor()
+        cursor.fast_executemany = True
+
+        try:
+            cursor.executemany(insert_sql, chunk_rows)
+            conn.commit()
+        except pyodbc.IntegrityError:
+            conn.rollback()
+            # this batch (or one row in it) was already inserted — fall back to row-by-row
+            # to insert only the genuinely new ones
+            for row in chunk_rows:
+                try:
+                    cursor.execute(insert_sql, row)
+                    conn.commit()
+                except pyodbc.IntegrityError:
+                    conn.rollback()  # this one's a dup, skip it
+
+    def insert_embed(self, embed_rows):
+        connection_string = "Driver={ODBC Driver 18 for SQL Server};"
+        connection_string += "TrustServerCertificate=yes;"
+        connection_string += "Server=" + self.sqlserver_connection.name + ";"
+        connection_string += "Database=" + self.sqlserver_connection.database + ";"
+        connection_string += "UID=" + self.sqlserver_connection.username + ";"
+        connection_string += "PWD=" + '3ZGmpRkiPsCv' + ";"
+
+        insert_sql = "INSERT INTO ChunkEmbeddings (ChunkID, ModelID, VectorBlob) VALUES (?, ?, ?)"
+        conn = pyodbc.connect(connection_string)
+        cursor = conn.cursor()
+        cursor.fast_executemany = True
+
+        try:
+            cursor.executemany(insert_sql, embed_rows)
+            conn.commit()
+        except pyodbc.IntegrityError:
+            conn.rollback()
+            # this batch (or one row in it) was already inserted — fall back to row-by-row
+            # to insert only the genuinely new ones
+            for row in embed_rows:
+                try:
+                    cursor.execute(insert_sql, row)
+                    conn.commit()
+                except pyodbc.IntegrityError:
+                    conn.rollback()  # this one's a dup, skip it
+
     def extract_and_store(self, source_audio_dir, batch_start, batch_end, index_name="chipbot-birdnet-24"):
         pc = Pinecone(api_key=self.pinecone_key)
         analyzer = Analyzer(custom_species_list_path=self.species_list_path)
         index = pc.Index(index_name)
         # index.delete(delete_all=True, namespace="__default__")
+
+        m = SQLServerUtilities
+        print(m.decrypt_pw(self.sqlserver_connection.key, self.sqlserver_connection.token))
+
 
         detection_file_path = source_audio_dir / f"detection_results.txt"
 
@@ -519,79 +577,31 @@ class BirdNetParser(BirdNetParserBase):
             [f for f in source_audio_dir.iterdir() if f.suffix.lower() == ".wav"],
             key=lambda x: str(x)
         )
-        with open(detection_file_path, "w", encoding="utf-8") as f_out:
-            for idx, file_path in enumerate(audio_files, 1):
-                print(f"[{idx}/{len(audio_files)}] Embedding: {file_path.name}")
-                f_out.write(f"=== File: {file_path.name} ===\n")
-                try:
-                    detections, embeddings, metadata = self.extract_embeddings_and_detect(
-                        file_path, analyzer)
-                except Exception as e:
-                    print(f"Error on {file_path.name}: {e}")
-                    continue
 
-                if len(embeddings) == 0:
-                    continue
+        for idx, file_path in enumerate(audio_files, 1):
+            try:
+                detections, embeddings, metadata = self.extract_embeddings_and_detect(file_path, analyzer)
+            except Exception as e:
+                print(f"Error on {file_path.name}: {e}")
+                continue
+            i = 0
+            insert_data_chunk = []
+            insert_data_embed = []
+            for item_m, item_e in zip(metadata, embeddings):
+                vector_str = json.dumps(item_e.tolist())
+                chunk_id = item_m['file'][:-4] + '_' + str(i)
+                insert_data_chunk.append((chunk_id, item_m['file'][:-4], item_m['start_time'], item_m['end_time'], i))
+                insert_data_embed.append((chunk_id, float(self.birdnet_model_version), vector_str))
+                i += 1
+            #self.insert_chunk(insert_data_chunk)
+            self.insert_embed(insert_data_embed)
 
-                # Write text detections
-                if not detections:
-                    f_out.write("No detections found.\n")
-                else:
-                    for detection in detections:
-                        result_line = (
-                            f"Time: {detection['start_time']:.1f}s - {detection['end_time']:.1f}s | "
-                            f"Species: {detection['common_name']} ({detection['scientific_name']}) | "
-                            f"Confidence: {detection['confidence']:.2%}\n"
-                        )
-                        f_out.write(result_line)
-                f_out.write("\n" + "=" * 50 + "\n\n")
+            print('hen')
 
-                # get all the location metadata from gps coordinates
-                my_file_parts = file_path.stem.split("_")
-                gps = my_file_parts[2], my_file_parts[3]
-                my_device = my_file_parts[0]
-                my_datetime = my_file_parts[1]
-                utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
-                                               params_values=gps, params='@lat=?, @long=?', logger=self.logger)
-                site = utilities.run_sql_return_params()
-                my_site = site[0][0].replace(' ', '-')
-                my_locations = self.get_regions(gps)
-                my_country = my_locations['country'].replace(' ', '-')
-                my_region = my_locations['region'].replace(' ', '-')
-                my_province = my_locations['province'].replace(' ', '-')
-                my_municipality = my_locations['municipality'].replace(' ', '-')
-                my_local = my_locations['local'].replace(' ', '-')
 
-                vectors = []
-                for i, (emb, meta) in enumerate(zip(embeddings, metadata)):
-                    vectors.append({
-                        "id": f"{file_path.stem}_{i}",
-                        "values": emb.tolist(),
-                        "metadata": {
-                            "file": meta["file"],
-                            "chunk_start": meta["start_time"],
-                            "chunk_end": meta["end_time"],
-                            "birdnet_label": meta["birdnet_label"],
-                            "birdnet_labels": meta["birdnet_labels"],
-                            "confidence": meta["confidence"],
-                            "num_species": meta["num_species"],
-                            "country": my_country,
-                            "region": my_region,
-                            "province": my_province,
-                            "municipality": my_municipality,
-                            "local": my_local,
-                            "site": my_site,
-                            'lat': gps[0],
-                            'long': gps[1],
-                            'device': my_device,
-                            'datetime': my_datetime,
-                            "embedding_model_version": self.birdnet_model_version,
-                            "min_confidence_used": self.min_confidence,
-                            "batch_start": batch_start,
-                            "batch_end": batch_end
-                        }
-                    })
-                index.upsert(vectors=vectors)
+
+
+
         print("Extraction and storage complete.")
 
 
