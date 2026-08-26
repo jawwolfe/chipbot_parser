@@ -534,6 +534,33 @@ class BirdNetParser(BirdNetParserBase):
                 except pyodbc.IntegrityError:
                     conn.rollback()  # this one's a dup, skip it
 
+    def insert_detection(self, detection_rows):
+        connection_string = "Driver={ODBC Driver 18 for SQL Server};"
+        connection_string += "TrustServerCertificate=yes;"
+        connection_string += "Server=" + self.sqlserver_connection.name + ";"
+        connection_string += "Database=" + self.sqlserver_connection.database + ";"
+        connection_string += "UID=" + self.sqlserver_connection.username + ";"
+        connection_string += "PWD=" + '3ZGmpRkiPsCv' + ";"
+
+        insert_sql = "INSERT INTO Detections (ChunkID, ModelID, Species, Confidence) VALUES (?, ?, ?, ?)"
+        conn = pyodbc.connect(connection_string)
+        cursor = conn.cursor()
+        cursor.fast_executemany = True
+
+        try:
+            cursor.executemany(insert_sql, detection_rows)
+            conn.commit()
+        except pyodbc.IntegrityError:
+            conn.rollback()
+            # this batch (or one row in it) was already inserted — fall back to row-by-row
+            # to insert only the genuinely new ones
+            for row in detection_rows:
+                try:
+                    cursor.execute(insert_sql, row)
+                    conn.commit()
+                except pyodbc.IntegrityError:
+                    conn.rollback()  # this one's a dup, skip it
+
     def insert_embed(self, embed_rows):
         connection_string = "Driver={ODBC Driver 18 for SQL Server};"
         connection_string += "TrustServerCertificate=yes;"
@@ -567,12 +594,6 @@ class BirdNetParser(BirdNetParserBase):
         index = pc.Index(index_name)
         # index.delete(delete_all=True, namespace="__default__")
 
-        m = SQLServerUtilities
-        print(m.decrypt_pw(self.sqlserver_connection.key, self.sqlserver_connection.token))
-
-
-        detection_file_path = source_audio_dir / f"detection_results.txt"
-
         audio_files = natsort.natsorted(
             [f for f in source_audio_dir.iterdir() if f.suffix.lower() == ".wav"],
             key=lambda x: str(x)
@@ -587,21 +608,20 @@ class BirdNetParser(BirdNetParserBase):
             i = 0
             insert_data_chunk = []
             insert_data_embed = []
-            for item_m, item_e in zip(metadata, embeddings):
+            insert_data_detect = []
+            for item_m, item_e, item_d in zip(metadata, embeddings, detections):
                 vector_str = json.dumps(item_e.tolist())
                 chunk_id = item_m['file'][:-4] + '_' + str(i)
                 insert_data_chunk.append((chunk_id, item_m['file'][:-4], item_m['start_time'], item_m['end_time'], i))
                 insert_data_embed.append((chunk_id, float(self.birdnet_model_version), vector_str))
+                insert_data_detect.append((chunk_id, float(self.birdnet_model_version),
+                                           item_d['common_name'] + '(' + item_d['scientific_name'] + ')',
+                                           item_d['confidence']))
                 i += 1
-            #self.insert_chunk(insert_data_chunk)
+            self.insert_chunk(insert_data_chunk)
             self.insert_embed(insert_data_embed)
-
-            print('hen')
-
-
-
-
-
+            if insert_data_detect:
+                self.insert_detection(insert_data_detect)
         print("Extraction and storage complete.")
 
 
