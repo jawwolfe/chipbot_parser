@@ -603,7 +603,7 @@ class BirdNetParser(BirdNetParserBase):
                     if item_log['Filename'] == item_file.stem:
                         flag = True
             if not flag:
-                msg = "Audio file in log missing from external drive."
+                msg = f"Audio file in log missing from external drive {item_file.stem}"
                 self.logger.error(msg)
                 raise VerifyFileException(msg)
 
@@ -660,6 +660,7 @@ class BirdNetParser(BirdNetParserBase):
                                                                               '@LocationID=?, @BatchStart=?, '
                                                                               '@BatchEnd=?', logger=self.logger)
             batch_id = utilities.run_sql_return_params()[0][0]
+            self.logger.info(f"Processing Batch: {my_file_parts[0]}_{first_timestamp}_{last_timestamp}_{lat}_{lon}")
             my_site_name = site_data[0][1].replace(' ', '-')
             my_country = my_locations['country'].replace(' ', '-')
             my_province = my_locations['province'].replace(' ', '-')
@@ -684,6 +685,7 @@ class BirdNetParser(BirdNetParserBase):
                                                                                   '@Temp=?, @Humidity=?, @Battery=?, '
                                                                                   '@DatetimeStart=?, @Length=?',
                                                logger=self.logger)
+                self.logger.info(f"Processing File: {new_filename}")
                 if file_length == 0.0:
                     # delete file
                     wav_file_path.unlink(missing_ok=True)
