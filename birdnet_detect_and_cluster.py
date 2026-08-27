@@ -13,8 +13,8 @@ import shutil, os, csv, sys, wave, re, json
 from collections import defaultdict
 import requests
 from mu_utilities.utilities import SQLServerUtilities
-from mu_utilities.exceptions import DatabaseOperationException
-from exceptions import RawAudioBatchException
+from mu_utilities.exceptions import DatabaseOperationException, DatabaseIntegrityException
+from exceptions import RawAudioBatchException, VerifyFileException
 from pinecone import Pinecone
 from operator import itemgetter
 import soundfile as sf
@@ -424,7 +424,9 @@ class BirdNetParser(BirdNetParserBase):
                 super().__init__(*args, **kwargs)
 
         tf.lite.Interpreter = EmbeddingSafeInterpreter
-
+        raw_embeddings = []
+        embedding_overlap = None
+        chunks= None
         try:
             embedding_analyzer = Analyzer()
             embedding_overlap = 0.0  # explicit: embeddings pass uses no overlap
@@ -458,11 +460,11 @@ class BirdNetParser(BirdNetParserBase):
                         else:
                             cleaned_embeddings.append(None)
                 except Exception as e:
-                    print(f"   [Warning] Failed to parse embedding element: {e}")
+                    msg = f"[Warning] Failed to parse embedding element: {e}"
+                    self.logger.error(msg)
                     cleaned_embeddings.append(None)
 
         chunks_metadata = []
-
         embedding_step = 3.0 - embedding_overlap  # = 3.0, matches actual embedding chunk spacing
 
         for i, chunk in enumerate(chunks):
@@ -507,93 +509,12 @@ class BirdNetParser(BirdNetParserBase):
 
         return detections, np.array(valid_embeddings), chunks_metadata
 
-    def insert_chunk(self, chunk_rows):
-        connection_string = "Driver={ODBC Driver 18 for SQL Server};"
-        connection_string += "TrustServerCertificate=yes;"
-        connection_string += "Server=" + self.sqlserver_connection.name + ";"
-        connection_string += "Database=" + self.sqlserver_connection.database + ";"
-        connection_string += "UID=" + self.sqlserver_connection.username + ";"
-        connection_string += "PWD=" + '3ZGmpRkiPsCv' + ";"
 
-        insert_sql = "INSERT INTO Chunks (ChunkID, FileName, StartSample, EndSample, ChunkIndex) VALUES (?, ?, ?, ?, ?)"
-        conn = pyodbc.connect(connection_string)
-        cursor = conn.cursor()
-        cursor.fast_executemany = True
-
-        try:
-            cursor.executemany(insert_sql, chunk_rows)
-            conn.commit()
-        except pyodbc.IntegrityError:
-            conn.rollback()
-            # this batch (or one row in it) was already inserted — fall back to row-by-row
-            # to insert only the genuinely new ones
-            for row in chunk_rows:
-                try:
-                    cursor.execute(insert_sql, row)
-                    conn.commit()
-                except pyodbc.IntegrityError:
-                    conn.rollback()  # this one's a dup, skip it
-
-    def insert_detection(self, detection_rows):
-        connection_string = "Driver={ODBC Driver 18 for SQL Server};"
-        connection_string += "TrustServerCertificate=yes;"
-        connection_string += "Server=" + self.sqlserver_connection.name + ";"
-        connection_string += "Database=" + self.sqlserver_connection.database + ";"
-        connection_string += "UID=" + self.sqlserver_connection.username + ";"
-        connection_string += "PWD=" + '3ZGmpRkiPsCv' + ";"
-
-        insert_sql = "INSERT INTO Detections (ChunkID, ModelID, Species, Confidence) VALUES (?, ?, ?, ?)"
-        conn = pyodbc.connect(connection_string)
-        cursor = conn.cursor()
-        cursor.fast_executemany = True
-
-        try:
-            cursor.executemany(insert_sql, detection_rows)
-            conn.commit()
-        except pyodbc.IntegrityError:
-            conn.rollback()
-            # this batch (or one row in it) was already inserted — fall back to row-by-row
-            # to insert only the genuinely new ones
-            for row in detection_rows:
-                try:
-                    cursor.execute(insert_sql, row)
-                    conn.commit()
-                except pyodbc.IntegrityError:
-                    conn.rollback()  # this one's a dup, skip it
-
-    def insert_embed(self, embed_rows):
-        connection_string = "Driver={ODBC Driver 18 for SQL Server};"
-        connection_string += "TrustServerCertificate=yes;"
-        connection_string += "Server=" + self.sqlserver_connection.name + ";"
-        connection_string += "Database=" + self.sqlserver_connection.database + ";"
-        connection_string += "UID=" + self.sqlserver_connection.username + ";"
-        connection_string += "PWD=" + '3ZGmpRkiPsCv' + ";"
-
-        insert_sql = "INSERT INTO ChunkEmbeddings (ChunkID, ModelID, VectorBlob) VALUES (?, ?, ?)"
-        conn = pyodbc.connect(connection_string)
-        cursor = conn.cursor()
-        cursor.fast_executemany = True
-
-        try:
-            cursor.executemany(insert_sql, embed_rows)
-            conn.commit()
-        except pyodbc.IntegrityError:
-            conn.rollback()
-            # this batch (or one row in it) was already inserted — fall back to row-by-row
-            # to insert only the genuinely new ones
-            for row in embed_rows:
-                try:
-                    cursor.execute(insert_sql, row)
-                    conn.commit()
-                except pyodbc.IntegrityError:
-                    conn.rollback()  # this one's a dup, skip it
-
-    def extract_and_store(self, source_audio_dir, batch_start, batch_end, index_name="chipbot-birdnet-24"):
-        pc = Pinecone(api_key=self.pinecone_key)
-        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
-        index = pc.Index(index_name)
+    def extract_and_store(self, source_audio_dir, index_name="chipbot-birdnet-24"):
+        #pc = Pinecone(api_key=self.pinecone_key)
+        #index = pc.Index(index_name)
         # index.delete(delete_all=True, namespace="__default__")
-
+        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
         audio_files = natsort.natsorted(
             [f for f in source_audio_dir.iterdir() if f.suffix.lower() == ".wav"],
             key=lambda x: str(x)
@@ -609,20 +530,53 @@ class BirdNetParser(BirdNetParserBase):
             insert_data_chunk = []
             insert_data_embed = []
             insert_data_detect = []
-            for item_m, item_e, item_d in zip(metadata, embeddings, detections):
+            for item_m, item_e in zip(metadata, embeddings):
+                chunk_id_m = file_path.stem + "_" + str(int(item_m['start_time'] / 3))
                 vector_str = json.dumps(item_e.tolist())
-                chunk_id = item_m['file'][:-4] + '_' + str(i)
-                insert_data_chunk.append((chunk_id, item_m['file'][:-4], item_m['start_time'], item_m['end_time'], i))
-                insert_data_embed.append((chunk_id, float(self.birdnet_model_version), vector_str))
+                insert_data_chunk.append((chunk_id_m, item_m['file'][:-4], item_m['start_time'], item_m['end_time'], i))
+                insert_data_embed.append((chunk_id_m, float(self.birdnet_model_version), vector_str))
+                i += 1
+            for item_d in detections:
+                chunk_id = file_path.stem + "_" + str(int(item_d['start_time'] / 3))
                 insert_data_detect.append((chunk_id, float(self.birdnet_model_version),
                                            item_d['common_name'] + '(' + item_d['scientific_name'] + ')',
                                            item_d['confidence']))
-                i += 1
-            self.insert_chunk(insert_data_chunk)
-            self.insert_embed(insert_data_embed)
+                
+            insert_sql = "INSERT INTO Chunks (ChunkID, FileName, StartSample, EndSample, ChunkIndex) VALUES (?, ?, ?, ?, ?)"
+            utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
+                                           params_values=insert_data_chunk, logger=self.logger)
+            try:
+                utilities.run_sql_bulk_params()
+                self.logger.info(f"Inserted {str(len(insert_data_chunk))} chunks.")
+            except DatabaseIntegrityException as err:
+                first_value = insert_data_chunk[0]
+                msg = f"Duplicates in the chunks batch commit rolled back.{str(first_value)}"
+                self.logger.error(msg)
+
+            insert_sql = "INSERT INTO ChunkEmbeddings (ChunkID, ModelID, VectorBlob) VALUES (?, ?, ?)"
+            utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
+                                           params_values=insert_data_embed, logger=self.logger)
+            try:
+                utilities.run_sql_bulk_params()
+                self.logger.info(f"Inserted {str(len(insert_data_embed))} embeddings.")
+            except DatabaseIntegrityException as err:
+                first_value = insert_data_embed[0]
+                msg = f"Duplicates in the chunk embeddings batch commit rolled back."
+                self.logger.error(msg)
+
             if insert_data_detect:
-                self.insert_detection(insert_data_detect)
-        print("Extraction and storage complete.")
+                insert_sql = "INSERT INTO Detections (ChunkID, ModelID, Species, Confidence) VALUES (?, ?, ?, ?)"
+                utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
+                                               params_values=insert_data_detect, logger=self.logger)
+                try:
+                    utilities.run_sql_bulk_params()
+                    self.logger.info(f"Inserted {str(len(insert_data_detect))} detections.")
+                except DatabaseIntegrityException as err:
+                    first_value = insert_data_detect[0]
+                    msg = f"Duplicates in the detections batch commit rolled back.{str(first_value)}"
+                    self.logger.error(msg)
+
+        self.logger.info("Extraction and storage complete.")
 
 
     def import_file_batch(self):
@@ -638,7 +592,7 @@ class BirdNetParser(BirdNetParserBase):
         if not audio_files_ext:
             msg = f"No matching audio (.wav) files found in external_drive: {self.external_drive}"
             self.logger.error(msg)
-            raise FileNotFoundError(msg)
+            raise VerifyFileException(msg)
 
         audio_files_ext = natsort.natsorted(audio_files_ext, key=lambda x: str(x))
         # quality check the log file against all the audio files in the directory
@@ -649,7 +603,10 @@ class BirdNetParser(BirdNetParserBase):
                     if item_log['Filename'] == item_file.stem:
                         flag = True
             if not flag:
-                print("Audio file in log missing from external drive.")
+                msg = "Audio file in log missing from external drive."
+                self.logger.error(msg)
+                raise VerifyFileException(msg)
+
 
         for batch in log_files_ext_data:
             # note that all files in a batch (one log file) have same gps coordinates first is same as all files
@@ -674,9 +631,6 @@ class BirdNetParser(BirdNetParserBase):
                     new_name_path = old_name_path.with_name(new_filename)
                     if old_name_path.exists():
                         shutil.move(old_name_path, new_name_path)
-                        print(f"Successfully renamed to: {new_name_path}")
-                    else:
-                        print(f"Error: Source file does not exist: {old_name_path}")
 
             utilities = SQLServerUtilities(sp='sp_get_site_by_coordinates',
                                            sql_server_connection=self.sqlserver_connection,
@@ -739,11 +693,10 @@ class BirdNetParser(BirdNetParserBase):
                     shutil.move(wav_file_path, archive_dir)
             log_file_path = self.external_drive / Path(batch['logfilename'])
             shutil.move(self.external_drive / log_file_path, archive_dir)
+            self.logger.info("This batch files have been processed and moved to archive.")
+            # now insert all embeddings for this batch into SQL Server
+            self.extract_and_store(source_audio_dir=archive_dir)
 
-
-        pass
-        #self.extract_and_store(source_audio_dir=archive_dir, batch_start=first_file_datetime,
-        #                       batch_end=last_file_datetime)'''
 
 
     def clusterer(self, batch=(str, str, str), index_name="chipbot-birdnet-24", only_unidentified=True):
