@@ -546,8 +546,8 @@ class BirdNetParser(BirdNetParserBase):
             utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
                                            params_values=insert_data_chunk, logger=self.logger)
             try:
+                self.logger.info(f"{str(len(insert_data_chunk))} chunks.")
                 utilities.run_sql_bulk_params()
-                self.logger.info(f"Inserted {str(len(insert_data_chunk))} chunks.")
             except DatabaseIntegrityException as err:
                 first_value = insert_data_chunk[0]
                 msg = f"Duplicates in the chunks batch commit rolled back.{str(first_value)}"
@@ -557,8 +557,8 @@ class BirdNetParser(BirdNetParserBase):
             utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
                                            params_values=insert_data_embed, logger=self.logger)
             try:
+                self.logger.info(f"{str(len(insert_data_embed))} embeddings.")
                 utilities.run_sql_bulk_params()
-                self.logger.info(f"Inserted {str(len(insert_data_embed))} embeddings.")
             except DatabaseIntegrityException as err:
                 first_value = insert_data_embed[0]
                 msg = f"Duplicates in the chunk embeddings batch commit rolled back."
@@ -569,14 +569,14 @@ class BirdNetParser(BirdNetParserBase):
                 utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
                                                params_values=insert_data_detect, logger=self.logger)
                 try:
+                    self.logger.info(f"{str(len(insert_data_detect))} detections.")
                     utilities.run_sql_bulk_params()
-                    self.logger.info(f"Inserted {str(len(insert_data_detect))} detections.")
                 except DatabaseIntegrityException as err:
                     first_value = insert_data_detect[0]
                     msg = f"Duplicates in the detections batch commit rolled back.{str(first_value)}"
                     self.logger.error(msg)
 
-        self.logger.info("Extraction and storage complete.")
+        self.logger.info("This batch extraction and storage complete.")
 
 
     def import_file_batch(self):
@@ -660,7 +660,7 @@ class BirdNetParser(BirdNetParserBase):
                                                                               '@LocationID=?, @BatchStart=?, '
                                                                               '@BatchEnd=?', logger=self.logger)
             batch_id = utilities.run_sql_return_params()[0][0]
-            self.logger.info(f"Processing Batch: {my_file_parts[0]}_{first_timestamp}_{last_timestamp}_{lat}_{lon}")
+            self.logger.info(f"Processing {len(batch['data'])} files in batch: {my_file_parts[0]}_{first_timestamp}_{last_timestamp}_{lat}_{lon}")
             my_site_name = site_data[0][1].replace(' ', '-')
             my_country = my_locations['country'].replace(' ', '-')
             my_province = my_locations['province'].replace(' ', '-')
@@ -696,6 +696,7 @@ class BirdNetParser(BirdNetParserBase):
             log_file_path = self.external_drive / Path(batch['logfilename'])
             shutil.move(self.external_drive / log_file_path, archive_dir)
             self.logger.info("This batch files have been processed and moved to archive.")
+            self.logger.info("Begin Birdnet Embedding and Database insert.")
             # now insert all embeddings for this batch into SQL Server
             self.extract_and_store(source_audio_dir=archive_dir)
 
