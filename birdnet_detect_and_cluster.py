@@ -13,7 +13,7 @@ import shutil, os, csv, sys, wave, re, json
 from collections import defaultdict
 import requests
 from mu_utilities.utilities import SQLServerUtilities
-from mu_utilities.exceptions import DatabaseOperationException, DatabaseIntegrityException
+from mu_utilities.exceptions import DatabaseIntegrityException
 from exceptions import RawAudioBatchException, VerifyFileException
 from pinecone import Pinecone
 from operator import itemgetter
@@ -345,65 +345,6 @@ class BirdNetParser(BirdNetParserBase):
                     if gap_bytes and idx != len(group) - 1:
                         out_wf.writeframes(gap_bytes)
 
-    def _fetch_all_vectors(self, index, namespace=None, filter=None, batch_size=100):
-        """
-        Pulls all vectors (+ metadata) from a Pinecone namespace.
-        """
-        all_records = []
-        ids_to_fetch = []
-
-        target_namespace = namespace if namespace is not None else ""
-
-        # Step 1: Extract string IDs from ListResponse objects
-        for page in index.list(namespace=target_namespace):
-            # Handle ListResponse / dict containing 'vectors'
-            if hasattr(page, "vectors") and page.vectors:
-                # page.vectors is a list of objects/dicts like [{'id': '...'}, ...]
-                for vec in page.vectors:
-                    if isinstance(vec, dict):
-                        ids_to_fetch.append(vec.get("id"))
-                    elif hasattr(vec, "id"):
-                        ids_to_fetch.append(vec.id)
-                    elif isinstance(vec, str):
-                        ids_to_fetch.append(vec)
-            # Fallback if page directly yields a list/tuple of items
-            elif isinstance(page, (list, tuple)):
-                for item in page:
-                    if isinstance(item, str):
-                        ids_to_fetch.append(item)
-                    elif isinstance(item, dict) and "id" in item:
-                        ids_to_fetch.append(item["id"])
-                    elif hasattr(item, "id"):
-                        ids_to_fetch.append(item.id)
-
-        # Filter out any None values
-        ids_to_fetch = [i for i in ids_to_fetch if i]
-
-        print(f"Found {len(ids_to_fetch)} vector IDs — fetching in batches...")
-
-        if not ids_to_fetch:
-            return all_records
-
-        print(f"Sample clean ID: {repr(ids_to_fetch[0])}")  # Confirm clean string output
-
-        # Step 2: Fetch full records in batches
-        for i in range(0, len(ids_to_fetch), batch_size):
-            batch_ids = ids_to_fetch[i:i + batch_size]
-            response = index.fetch(ids=batch_ids, namespace=target_namespace)
-
-            for vec_id, record in response.vectors.items():
-                meta = record.metadata or {}
-                if filter and not all(meta.get(k) == v for k, v in filter.items()):
-                    continue
-                all_records.append({
-                    "id": vec_id,
-                    "values": record.values,
-                    "metadata": meta,
-                })
-
-        print(f"Retrieved {len(all_records)} vectors after filtering.")
-        return all_records
-
     def extract_embeddings_and_detect(self, file_path, analyzer):
         """
         Runs species detection using the customized species list Analyzer,
@@ -547,7 +488,7 @@ class BirdNetParser(BirdNetParserBase):
                                            params_values=insert_data_chunk, logger=self.logger)
             try:
                 self.logger.info(f"{str(len(insert_data_chunk))} chunks.")
-                utilities.run_sql_bulk_params()
+                utilities.run_plain_sql_bulk_params()
             except DatabaseIntegrityException as err:
                 first_value = insert_data_chunk[0]
                 msg = f"Duplicates in the chunks batch commit rolled back.{str(first_value)}"
@@ -558,7 +499,7 @@ class BirdNetParser(BirdNetParserBase):
                                            params_values=insert_data_embed, logger=self.logger)
             try:
                 self.logger.info(f"{str(len(insert_data_embed))} embeddings.")
-                utilities.run_sql_bulk_params()
+                utilities.run_plain_sql_bulk_params()
             except DatabaseIntegrityException as err:
                 first_value = insert_data_embed[0]
                 msg = f"Duplicates in the chunk embeddings batch commit rolled back."
@@ -570,7 +511,7 @@ class BirdNetParser(BirdNetParserBase):
                                                params_values=insert_data_detect, logger=self.logger)
                 try:
                     self.logger.info(f"{str(len(insert_data_detect))} detections.")
-                    utilities.run_sql_bulk_params()
+                    utilities.run_plain_sql_bulk_params()
                 except DatabaseIntegrityException as err:
                     first_value = insert_data_detect[0]
                     msg = f"Duplicates in the detections batch commit rolled back.{str(first_value)}"
@@ -714,7 +655,7 @@ class BirdNetParser(BirdNetParserBase):
         params_json_payload = json.dumps(jconfig_payload, default=vars)
         my_algorithm = 'HDBSCAN'
 
-        sql='Select c.[FileName], ce.VectorBlob '
+        sql='Select c.[ChunkID], ce.VectorBlob '
         sql+='from Chunks c '
         sql+='inner join ChunkEmbeddings ce on c.ChunkID = ce.ChunkID '
         sql+='inner join Files f on FileFullName = c.[FileName] '
@@ -745,12 +686,14 @@ class BirdNetParser(BirdNetParserBase):
                                        logger=self.logger)
 
         records = utilities.run_plain_sql_return()
+        chunk_ids = [r[0] for r in records]
         parsed_rows = [
             json.loads(r[1]) if isinstance(r[1], str) else r[1]
             for r in records
         ]
         X = np.array(parsed_rows, dtype=float)
         df = pd.DataFrame()
+        df['ChunkID'] = chunk_ids
         norms = np.linalg.norm(X, axis=1, keepdims=True)
         X_normalized = np.where(norms == 0, X, X / norms)
         # Clustering-space UMAP — feeds HDBSCAN
@@ -782,7 +725,7 @@ class BirdNetParser(BirdNetParserBase):
         df['umap_x'] = X_2d[:, 0]
         df['umap_y'] = X_2d[:, 1]
         df.to_csv('output.csv', index=False)
-        counts_dict = df[df["cluster"] != -1]["cluster"].value_counts().to_dict()
+        counts_dict = df["cluster"].value_counts().to_dict()
 
         # enter run
         run_params = (my_algorithm, params_json_payload, float(self.birdnet_model_version), only_unidentified,
@@ -793,6 +736,7 @@ class BirdNetParser(BirdNetParserBase):
                                               '@StartDate=?, @EndDate=?, @LocationLevel1=?, @LocationLevel2=?, '
                                               '@LocationLevel3=?, @BatchID=?, @Notes=?, @NewRunID=? OUTPUT', logger=self.logger)
         run_id = utilities.run_sql_return_params(result_scalar=True)[0]
+        df['RunID'] = run_id
 
         # enter site runs if needed
         if site_list:
@@ -811,6 +755,15 @@ class BirdNetParser(BirdNetParserBase):
                                                                             '@CentroidBlob=?, @Label=?',
                                            logger=self.logger)
             utilities.run_sql_params()
+
+        # enter cluster chunks
+        cols_in_order = ['ChunkID', 'cluster', 'cluster_probability', 'umap_x', 'umap_y', 'RunID']
+        data_to_insert = [tuple(row) for row in df[cols_in_order].itertuples(index=False, name=None)]
+        utilities = SQLServerUtilities(sp='sp_insert_cluster_chunks', sql_server_connection=self.sqlserver_connection,
+                                       params_values=data_to_insert, params='@ChunkID=?, @ClusterID=?, '
+                                                                            '@ClusterProbability=?, @UmapX=?, @UmapY=?, '
+                                                                            '@RunID=?', logger=self.logger)
+        utilities.run_sql_bulk_params()
 
 
 
