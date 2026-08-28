@@ -20,13 +20,42 @@ from operator import itemgetter
 import soundfile as sf
 import pyodbc
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
+from itertools import groupby
+from operator import attrgetter
+from dataclasses import dataclass
+from typing import Optional
 
 FILE_PREFIX = "cluster_"
 MAX_SPECIES_NAME_LENGTH = 120
 IGNORED_LABEL = "unidentified/ambient"
 DEFAULT_LAT = '39.8755985'
 DEFAULT_LONG = '-86.2844157'
+GAP_TOLERANCE = 2  # tune as needed
 
+@dataclass
+class DetectionRow:
+    detection_id: int
+    chunk_id: str
+    model_id: int
+    species: str
+    confidence: float
+    start_sample: int
+    end_sample: int
+    file_stem: str      # parsed from chunk_id
+    chunk_index: int    # parsed from chunk_id
+    directory: str
+
+@dataclass
+class Segment:
+    file_stem: str
+    species: str
+    start_sample: int
+    end_sample: int
+    first_chunk_id: str
+    last_chunk_id: str
+    last_chunk_index: int
+    chunk_ids: list  # all chunks included, for embedding pooling later
+    directory: str
 
 class BirdNetParserBase:
     def __init__(self, logger):
@@ -35,24 +64,24 @@ class BirdNetParserBase:
 class WavCache:
     """Keeps source WAV files open (read-only) and caches their audio params."""
 
-    def __init__(self, audio_dir):
-        self.audio_dir = audio_dir
+    def __init__(self):
         self._handles = {}
         self._params = {}
 
-    def get(self, filename):
-        if filename not in self._handles:
-            path = os.path.join(self.audio_dir, filename)
-            if not os.path.isfile(path):
-                sys.exit(f"Source WAV not found: {path}")
-            wf = wave.open(path, "rb")
-            self._handles[filename] = wf
-            self._params[filename] = wf.getparams()
-        return self._handles[filename]
+    def get(self, directory, file_stem):
+        key = (directory, file_stem)
+        if key not in self._handles:
+            path = Path(directory) / f"{file_stem}.wav"
+            if not path.is_file():
+                raise FileNotFoundError(f"Source WAV not found: {path}")
+            wf = wave.open(str(path), "rb")
+            self._handles[key] = wf
+            self._params[key] = wf.getparams()
+        return self._handles[key]
 
-    def params(self, filename):
-        self.get(filename)
-        return self._params[filename]
+    def params(self, directory, file_stem):
+        self.get(directory, file_stem)
+        return self._params[(directory, file_stem)]
 
     def close_all(self):
         for wf in self._handles.values():
@@ -548,7 +577,6 @@ class BirdNetParser(BirdNetParserBase):
                 self.logger.error(msg)
                 raise VerifyFileException(msg)
 
-
         for batch in log_files_ext_data:
             # note that all files in a batch (one log file) have same gps coordinates first is same as all files
             # so here we handle site, location and batch at this level
@@ -724,7 +752,6 @@ class BirdNetParser(BirdNetParserBase):
         X_2d = viz_reducer.fit_transform(X_normalized)
         df['umap_x'] = X_2d[:, 0]
         df['umap_y'] = X_2d[:, 1]
-        df.to_csv('output.csv', index=False)
         counts_dict = df["cluster"].value_counts().to_dict()
 
         # enter run
@@ -766,14 +793,112 @@ class BirdNetParser(BirdNetParserBase):
         utilities.run_sql_bulk_params()
 
 
+    def parse_chunk_id(self, chunk_id: str) -> tuple[str, int]:
+        file_stem, _, index_str = chunk_id.rpartition("_")
+        return file_stem, int(index_str)
 
 
-        print(run_id)
+    def fetch_all_detections(self) -> list[DetectionRow]:
+        utilities = SQLServerUtilities(sp='sp_get_all_detections', sql_server_connection=self.sqlserver_connection,
+                                       logger=self.logger)
+        detections = utilities.run_sql_return_no_params()
+        rows = []
+
+        for item in detections:
+            file_stem, chunk_index = self.parse_chunk_id(item[1])
+            rows.append(DetectionRow(
+                item[0], item[1], item[2], item[3], item[4],
+                item[5], item[6], file_stem, chunk_index, item[7]
+            ))
+        rows.sort(key=lambda r: (r.file_stem, r.chunk_index))
+        return rows
 
 
+    def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance: int = GAP_TOLERANCE) -> list[Segment]:
+        segments: list[Segment] = []
+
+        for file_stem, group in groupby(detections, key=attrgetter("file_stem")):
+            rows = list(group)
+            current: Optional[Segment] = None
+
+            for row in rows:
+                if current is not None:
+                    gap = row.chunk_index - current.last_chunk_index - 1
+                    same_species = row.species == current.species
+                    within_gap = gap <= gap_tolerance
+
+                    if same_species and within_gap:
+                        current.end_sample = row.end_sample
+                        current.last_chunk_id = row.chunk_id
+                        current.last_chunk_index = row.chunk_index
+                        current.chunk_ids.append(row.chunk_id)
+                        continue
+                    else:
+                        segments.append(current)
+                        current = None
+
+                current = Segment(
+                    file_stem=file_stem,
+                    species=row.species,
+                    start_sample=row.start_sample,
+                    end_sample=row.end_sample,
+                    first_chunk_id=row.chunk_id,
+                    last_chunk_id=row.chunk_id,
+                    last_chunk_index=row.chunk_index,
+                    chunk_ids=[row.chunk_id],
+                    directory=row.directory
+                )
+            if current is not None:
+                segments.append(current)
+        return segments
 
 
+    def make_segment_id(self, file_stem, start_sample, end_sample):
+        return f"{file_stem}_{start_sample}_{end_sample}"
 
+
+    def carve_segment_clips(self, segments, sanitize_species):
+        cache = WavCache()
+        os.makedirs(self.output_path, exist_ok=True)
+        written = []
+        try:
+            for seg in segments:
+                wf = cache.get(Path(self.audio_path / seg.directory), seg.file_stem)
+                params = cache.params(Path(self.audio_path / seg.directory), seg.file_stem)
+
+                data = self.extract_segment_bytes(wf, params, seg.start_sample, seg.end_sample)
+                if not data:
+                    print(f"Skipping empty segment: {seg.file_stem} [{seg.start_sample}-{seg.end_sample}]")
+                    continue
+
+                segment_id = self.make_segment_id(seg.file_stem, seg.start_sample, seg.end_sample)
+                species_slug = sanitize_species(seg.species)
+                out_path = Path(self.output_path) / f"{segment_id}_{species_slug}.wav"
+
+                with wave.open(str(out_path), "wb") as out_wf:
+                    out_wf.setnchannels(params.nchannels)
+                    out_wf.setsampwidth(params.sampwidth)
+                    out_wf.setframerate(params.framerate)
+                    out_wf.writeframes(data)
+
+                written.append((segment_id, str(out_path)))
+
+            return written
+        finally:
+            cache.close_all()
+
+
+    def run_segment_detections(self):
+        detections = self.fetch_all_detections()
+        segments = self.build_detection_segments(detections, gap_tolerance=GAP_TOLERANCE)
+
+        clips = self.carve_segment_clips(
+            segments,
+            sanitize_species=self.sanitize_for_filename,
+        )
+        print(clips)
+
+'''
     def run_pipeline(self):
         # GPU check
         gpus = tf.config.list_physical_devices('GPU')
@@ -894,14 +1019,14 @@ class BirdNetParser(BirdNetParserBase):
                         random_state=self.umap.random_state,
                     )
                     X_umap = cluster_reducer.fit_transform(X_normalized)
-                    '''
+
                     np.save(
                         output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy",
                         X_umap)
                     np.save(
                         output_path_results / f"embeddings_raw_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy",
                         X_normalized)
-                    '''
+      
                     print("Clustering reduced embeddings with HDBSCAN...")
                     clusterer = HDBSCAN(
                         min_cluster_size=self.hdbscan_clusters.min_cluster_size,
@@ -1073,3 +1198,4 @@ class BirdNetParser(BirdNetParserBase):
 
 
         print("\nDone.")
+'''
