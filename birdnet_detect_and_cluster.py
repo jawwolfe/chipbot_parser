@@ -539,7 +539,7 @@ class BirdNetParser(BirdNetParserBase):
             for item_d in detections:
                 chunk_id = file_path.stem + "_" + str(int(item_d['start_time'] / 3))
                 insert_data_detect.append((chunk_id, float(self.birdnet_model_version),
-                                           item_d['common_name'] + '(' + item_d['scientific_name'] + ')',
+                                           item_d['common_name'] + ' (' + item_d['scientific_name'] + ')',
                                            item_d['confidence']))
                 
             insert_sql = "INSERT INTO Chunks (ChunkID, FileName, StartSample, EndSample, ChunkIndex) VALUES (?, ?, ?, ?, ?)"
@@ -702,28 +702,55 @@ class BirdNetParser(BirdNetParserBase):
 
 
 
-    def clusterer(self, batch=(str, str, str), index_name="chipbot-birdnet-24", only_unidentified=True):
+    def clusterer(self, batch=(str, str, str), only_unidentified=True, start_date=None, end_date=None,
+                  site_list = None, level_1 = None, level_2 = None, level_3 = None):
 
-        pc = Pinecone(api_key=self.pinecone_key)  # instantiate once, store as an attribute
-        index = pc.Index(index_name)
+        jconfig_payload = {
+        "umap": self.umap,
+        "umap_viz": self.umap_viz,
+        "hdbscan": self.hdbscan_clusters
+        }
+        params_json_payload = json.dumps(jconfig_payload, default=vars)
+        my_algorithm = 'HDBSCAN'
 
-        desc = pc.describe_index(index_name)  # or index.describe_index_stats() depending on SDK version
-        print(desc)
-
-        filter_dict = {'embedding_model_version': self.birdnet_model_version}
+        sql='Select c.[FileName], ce.VectorBlob '
+        sql+='from Chunks c '
+        sql+='inner join ChunkEmbeddings ce on c.ChunkID = ce.ChunkID '
+        sql+='inner join Files f on FileFullName = c.[FileName] '
+        sql+='left outer join Detections d on d.ChunkID = c.ChunkID '
+        sql+='inner join [Batches] b on b.BatchID = f.BatchID '
+        sql+='inner join Locations l on l.LocationID = b.LocationID '
+        sql+='where d.DetectionID '
         if only_unidentified:
-            filter_dict["birdnet_label"] = "Unidentified/Ambient"
+            sql += 'is null '
+        else:
+            sql += 'is not null '
         if batch:
-            filter_dict["site"] = batch[0]
-            filter_dict['batch_start'] = batch[1]
-            filter_dict['batch_end'] = batch[2]
+            sql += "and b.BatchStart = '" + batch[1] + "' "
+            sql += "and b.BatchEnd = '" + batch[2] + "' "
+            sql += "and l.SiteID in (" + str(batch[0]) + ") "
+        else:
+            if site_list:
+                sql += "and l.SiteID in (" + site_list + ") "
+            if level_1:
+                sql += "and l.Level1 in = '" + level_1 + "' "
+            if level_2:
+                sql += "and l.Level2 in = '" + level_2 + "' "
+            if level_3:
+                sql += "and l.Level3 in = '" + level_3 + "' "
+            if start_date and end_date:
+                sql += "and f.DatetimeStart between '" + start_date + "' and '" + end_date + "' "
 
-        records = self._fetch_all_vectors(index,filter=filter_dict, namespace='__default__')
-        if not records:
-            print("No matching vectors found.")
-            return None
-        X = np.array([r["values"] for r in records])
-        df = pd.DataFrame([r["metadata"] for r in records])
+        utilities = SQLServerUtilities(sql=sql, sql_server_connection=self.sqlserver_connection,
+                                       logger=self.logger)
+
+        records = utilities.run_plain_sql_return()
+        parsed_rows = [
+            json.loads(r[1]) if isinstance(r[1], str) else r[1]
+            for r in records
+        ]
+        X = np.array(parsed_rows, dtype=float)
+        df = pd.DataFrame()
         norms = np.linalg.norm(X, axis=1, keepdims=True)
         X_normalized = np.where(norms == 0, X, X / norms)
         # Clustering-space UMAP — feeds HDBSCAN
@@ -755,7 +782,18 @@ class BirdNetParser(BirdNetParserBase):
         df['umap_x'] = X_2d[:, 0]
         df['umap_y'] = X_2d[:, 1]
         df.to_csv('output.csv', index=False)
-        return df
+        print(df)
+
+        # enter run
+        run_params = (my_algorithm, params_json_payload, float(self.birdnet_model_version), only_unidentified,
+                      len(records), start_date, end_date, level_1, level_2, level_3, "")
+        utilities = SQLServerUtilities(sp='sp_insert_run',
+                                       sql_server_connection=self.sqlserver_connection, params_values=run_params,
+                                       params='@Algorithm=?, @Parameters=?, @ModelID=?, @Unidentified=?, @ChunkCount=?, '
+                                              '@StartDate=?, @EndDate=?, @LocationLevel1=?, @LocationLevel2=?, '
+                                              '@LocationLevel3=?, @Notes', logger=self.logger)
+        run_id = utilities.run_sql_return_params()[0][0]
+        # get chunk count
 
 
 
