@@ -706,10 +706,11 @@ class BirdNetParser(BirdNetParserBase):
                   site_list = None, level_1 = None, level_2 = None, level_3 = None):
 
         jconfig_payload = {
+        "hdbscan": self.hdbscan_clusters,
         "umap": self.umap,
-        "umap_viz": self.umap_viz,
-        "hdbscan": self.hdbscan_clusters
+        "umap_viz": self.umap_viz
         }
+
         params_json_payload = json.dumps(jconfig_payload, default=vars)
         my_algorithm = 'HDBSCAN'
 
@@ -726,12 +727,11 @@ class BirdNetParser(BirdNetParserBase):
         else:
             sql += 'is not null '
         if batch:
-            sql += "and b.BatchStart = '" + batch[1] + "' "
-            sql += "and b.BatchEnd = '" + batch[2] + "' "
-            sql += "and l.SiteID in (" + str(batch[0]) + ") "
+            sql += "and b.BatchID = '" + str(batch) + "' "
         else:
             if site_list:
-                sql += "and l.SiteID in (" + site_list + ") "
+                formatted_sites = ",".join(map(str, site_list))
+                sql += f"and l.SiteID in ({formatted_sites}) "
             if level_1:
                 sql += "and l.Level1 in = '" + level_1 + "' "
             if level_2:
@@ -782,23 +782,40 @@ class BirdNetParser(BirdNetParserBase):
         df['umap_x'] = X_2d[:, 0]
         df['umap_y'] = X_2d[:, 1]
         df.to_csv('output.csv', index=False)
-        print(df)
+        counts_dict = df[df["cluster"] != -1]["cluster"].value_counts().to_dict()
 
         # enter run
         run_params = (my_algorithm, params_json_payload, float(self.birdnet_model_version), only_unidentified,
-                      len(records), start_date, end_date, level_1, level_2, level_3, batch, "")
+                      len(records), start_date, end_date, level_1, level_2, level_3, batch, "", None)
         utilities = SQLServerUtilities(sp='sp_insert_run',
                                        sql_server_connection=self.sqlserver_connection, params_values=run_params,
                                        params='@Algorithm=?, @Parameters=?, @ModelID=?, @Unidentified=?, @ChunkCount=?, '
                                               '@StartDate=?, @EndDate=?, @LocationLevel1=?, @LocationLevel2=?, '
-                                              '@LocationLevel3=?, @BatchID=?, @Notes=?', logger=self.logger)
-        run_id = utilities.run_sql_return_params()[0][0]
+                                              '@LocationLevel3=?, @BatchID=?, @Notes=?, @NewRunID=? OUTPUT', logger=self.logger)
+        run_id = utilities.run_sql_return_params(result_scalar=True)[0]
 
         # enter site runs if needed
+        if site_list:
+            for site in site_list:
+                run_params = (run_id, site)
+                utilities = SQLServerUtilities(sp='sp_insert_run_site',
+                                               sql_server_connection=self.sqlserver_connection, params_values=run_params,
+                                               params='@RunID=?, @SiteID=?', logger=self.logger)
+                utilities.run_sql_params()
+
+        # enter clusters
+        for cluster_num, row_count in counts_dict.items():
+            run_params = (run_id, cluster_num, row_count, None, None)
+            utilities = SQLServerUtilities(sp='sp_insert_cluster', sql_server_connection=self.sqlserver_connection,
+                                           params_values=run_params, params='@RunID=?, @ClusterID=?, @Size=?, '
+                                                                            '@CentroidBlob=?, @Label=?',
+                                           logger=self.logger)
+            utilities.run_sql_params()
 
 
 
 
+        print(run_id)
 
 
 
