@@ -702,7 +702,7 @@ class BirdNetParser(BirdNetParserBase):
 
 
 
-    def clusterer(self, batch=(str, str, str), only_unidentified=True, start_date=None, end_date=None,
+    def clusterer(self, batch=None, only_unidentified=True, start_date=None, end_date=None,
                   site_list = None, level_1 = None, level_2 = None, level_3 = None):
 
         jconfig_payload = {
@@ -786,14 +786,15 @@ class BirdNetParser(BirdNetParserBase):
 
         # enter run
         run_params = (my_algorithm, params_json_payload, float(self.birdnet_model_version), only_unidentified,
-                      len(records), start_date, end_date, level_1, level_2, level_3, "")
+                      len(records), start_date, end_date, level_1, level_2, level_3, batch, "")
         utilities = SQLServerUtilities(sp='sp_insert_run',
                                        sql_server_connection=self.sqlserver_connection, params_values=run_params,
                                        params='@Algorithm=?, @Parameters=?, @ModelID=?, @Unidentified=?, @ChunkCount=?, '
                                               '@StartDate=?, @EndDate=?, @LocationLevel1=?, @LocationLevel2=?, '
-                                              '@LocationLevel3=?, @Notes', logger=self.logger)
+                                              '@LocationLevel3=?, @BatchID=?, @Notes=?', logger=self.logger)
         run_id = utilities.run_sql_return_params()[0][0]
-        # get chunk count
+
+        # enter site runs if needed
 
 
 

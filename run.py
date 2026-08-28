@@ -90,5 +90,5 @@ parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_
 
 #parse.extract_and_store(source_audio_dir=AUDIO_PATH / "United-States_Indiana_Indianapolis-House-Backyard_2026-07-17-200624_2026-07-18-082620",
 #                        index_name="chipbot-birdnet-24", batch_start='2026-07-17-200624', batch_end='2026-07-18-082620')
-parse.clusterer(batch=(55, '2026-07-18-053107', '2026-07-18-082620'), only_unidentified=True)
+parse.clusterer(batch=2, only_unidentified=True)
 #parse.import_file_batch()
