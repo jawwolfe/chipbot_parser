@@ -1,7 +1,6 @@
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from datetime import datetime
 import natsort
 import tensorflow as tf
 # Clustering and reduction
@@ -10,6 +9,7 @@ from sklearn.cluster import HDBSCAN
 from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
 import shutil, os, csv, sys, wave, re, json
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 import requests
 from mu_utilities.utilities import SQLServerUtilities
@@ -18,7 +18,6 @@ from exceptions import RawAudioBatchException, VerifyFileException
 from pinecone import Pinecone
 from operator import itemgetter
 import soundfile as sf
-import pyodbc
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 from itertools import groupby
 from operator import attrgetter
@@ -31,6 +30,7 @@ IGNORED_LABEL = "unidentified/ambient"
 DEFAULT_LAT = '39.8755985'
 DEFAULT_LONG = '-86.2844157'
 GAP_TOLERANCE = 2  # tune as needed
+GAP_TOLERANCE_MS = 9000
 
 @dataclass
 class DetectionRow:
@@ -43,18 +43,22 @@ class DetectionRow:
     end_sample: int
     file_stem: str      # parsed from chunk_id
     chunk_index: int    # parsed from chunk_id
+    abs_start_ms: int   # new
+    abs_end_ms: int
     directory: str
 
 @dataclass
 class Segment:
     file_stem: str
     species: str
+    first_abs_start_ms: int
+    last_abs_end_ms: int
     start_sample: int
     end_sample: int
     first_chunk_id: str
     last_chunk_id: str
-    last_chunk_index: int
     chunk_ids: list  # all chunks included, for embedding pooling later
+    members: list[DetectionRow]
     directory: str
 
 class BirdNetParserBase:
@@ -480,6 +484,15 @@ class BirdNetParser(BirdNetParserBase):
         return detections, np.array(valid_embeddings), chunks_metadata
 
 
+    def get_abs_chunks_datetime(self, filename, start_sample, end_sample):
+        datetime_str = filename.split("_")[1]
+        base_dt = datetime.strptime(datetime_str, "%Y-%m-%d-%H%M%S")
+        abs_start = base_dt + timedelta(seconds=float(start_sample))
+        abs_end = base_dt + timedelta(seconds=float(end_sample))
+        return_value = (abs_start.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3], abs_end.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3])
+        return return_value
+
+
     def extract_and_store(self, source_audio_dir, index_name="chipbot-birdnet-24"):
         #pc = Pinecone(api_key=self.pinecone_key)
         #index = pc.Index(index_name)
@@ -503,7 +516,9 @@ class BirdNetParser(BirdNetParserBase):
             for item_m, item_e in zip(metadata, embeddings):
                 chunk_id_m = file_path.stem + "_" + str(int(item_m['start_time'] / 3))
                 vector_str = json.dumps(item_e.tolist())
-                insert_data_chunk.append((chunk_id_m, item_m['file'][:-4], item_m['start_time'], item_m['end_time'], i))
+                values = self.get_abs_chunks_datetime(item_m['file'][:-4], item_m['start_time'], item_m['end_time'])
+                insert_data_chunk.append((chunk_id_m, item_m['file'][:-4], item_m['start_time'], item_m['end_time'], i,
+                                          values[0], values[1]))
                 insert_data_embed.append((chunk_id_m, float(self.birdnet_model_version), vector_str))
                 i += 1
             for item_d in detections:
@@ -512,7 +527,8 @@ class BirdNetParser(BirdNetParserBase):
                                            item_d['common_name'] + ' (' + item_d['scientific_name'] + ')',
                                            item_d['confidence']))
                 
-            insert_sql = "INSERT INTO Chunks (ChunkID, FileName, StartSample, EndSample, ChunkIndex) VALUES (?, ?, ?, ?, ?)"
+            insert_sql = ("INSERT INTO Chunks (ChunkID, FileName, StartSample, EndSample, ChunkIndex, AbsStartMS, "
+                          "AbsEndMS) VALUES (?, ?, ?, ?, ?, ?, ?)")
             utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
                                            params_values=insert_data_chunk, logger=self.logger)
             try:
@@ -619,22 +635,22 @@ class BirdNetParser(BirdNetParserBase):
                                                                                  '@Level4=?, @Level5=?, @SiteID=?',
                                            logger=self.logger)
             location_id = utilities.run_sql_return_params()[0][0]
-
             lon = gps[1]
             lat = gps[0]
             gps_wkt = f"POINT({lon} {lat})"
-            batch_params = (my_file_parts[0], gps_wkt, location_id, first_timestamp, last_timestamp)
-            utilities = SQLServerUtilities(sp='sp_get_insert_batch', sql_server_connection=self.sqlserver_connection,
-                                           params_values=batch_params, params='@DeviceName=?, @GpsCoordinatesText=?, '
-                                                                              '@LocationID=?, @BatchStart=?, '
-                                                                              '@BatchEnd=?', logger=self.logger)
-            batch_id = utilities.run_sql_return_params()[0][0]
-            self.logger.info(f"Processing {len(batch['data'])} files in batch: {my_file_parts[0]}_{first_timestamp}_{last_timestamp}_{lat}_{lon}")
             my_site_name = site_data[0][1].replace(' ', '-')
             my_country = my_locations['country'].replace(' ', '-')
             my_province = my_locations['province'].replace(' ', '-')
             archive_stem = (my_country + "_" + my_province + "_" + my_site_name + '_' +
                             first_timestamp + "_" + last_timestamp)
+            batch_params = (my_file_parts[0], gps_wkt, location_id, first_timestamp, last_timestamp, archive_stem)
+            utilities = SQLServerUtilities(sp='sp_get_insert_batch', sql_server_connection=self.sqlserver_connection,
+                                           params_values=batch_params, params='@DeviceName=?, @GpsCoordinatesText=?, '
+                                                                              '@LocationID=?, @BatchStart=?, '
+                                                                              '@BatchEnd=?, @Directory=?',
+                                           logger=self.logger)
+            batch_id = utilities.run_sql_return_params()[0][0]
+            self.logger.info(f"Processing {len(batch['data'])} files in batch: {my_file_parts[0]}_{first_timestamp}_{last_timestamp}_{lat}_{lon}")
             archive_dir = Path(self.audio_path) / Path(archive_stem)
             archive_dir.mkdir(parents=True, exist_ok=True)
 
@@ -668,7 +684,6 @@ class BirdNetParser(BirdNetParserBase):
             self.logger.info("Begin Birdnet Embedding and Database insert.")
             # now insert all embeddings for this batch into SQL Server
             self.extract_and_store(source_audio_dir=archive_dir)
-
 
 
     def clusterer(self, batch=None, only_unidentified=True, start_date=None, end_date=None,
@@ -806,56 +821,57 @@ class BirdNetParser(BirdNetParserBase):
 
         for item in detections:
             file_stem, chunk_index = self.parse_chunk_id(item[1])
+            abs_start_ms = int(item[8].replace(tzinfo=timezone.utc).timestamp() * 1000)
+            abs_end_ms = int(item[9].replace(tzinfo=timezone.utc).timestamp() * 1000)
             rows.append(DetectionRow(
-                item[0], item[1], item[2], item[3], item[4],
-                item[5], item[6], file_stem, chunk_index, item[7]
+                detection_id=item[0], chunk_id=item[1], model_id=item[2], species=item[3], confidence=item[4],
+                start_sample=item[5], end_sample=item[6], file_stem=file_stem, chunk_index=chunk_index,
+                abs_start_ms=abs_start_ms, abs_end_ms=abs_end_ms, directory=item[7]
             ))
-        rows.sort(key=lambda r: (r.file_stem, r.chunk_index))
+        rows.sort(key=lambda r: (r.file_stem, r.abs_start_ms))
         return rows
 
-
-    def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance: int = GAP_TOLERANCE) -> list[Segment]:
+    def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance_ms: int = GAP_TOLERANCE_MS) -> \
+    list[Segment]:
         segments: list[Segment] = []
+        current: Optional[Segment] = None
 
-        for file_stem, group in groupby(detections, key=attrgetter("file_stem")):
-            rows = list(group)
-            current: Optional[Segment] = None
-
-            for row in rows:
-                if current is not None:
-                    gap = row.chunk_index - current.last_chunk_index - 1
-                    same_species = row.species == current.species
-                    within_gap = gap <= gap_tolerance
-
-                    if same_species and within_gap:
-                        current.end_sample = row.end_sample
-                        current.last_chunk_id = row.chunk_id
-                        current.last_chunk_index = row.chunk_index
-                        current.chunk_ids.append(row.chunk_id)
-                        continue
-                    else:
-                        segments.append(current)
-                        current = None
-
-                current = Segment(
-                    file_stem=file_stem,
-                    species=row.species,
-                    start_sample=row.start_sample,
-                    end_sample=row.end_sample,
-                    first_chunk_id=row.chunk_id,
-                    last_chunk_id=row.chunk_id,
-                    last_chunk_index=row.chunk_index,
-                    chunk_ids=[row.chunk_id],
-                    directory=row.directory
-                )
+        for row in detections:
             if current is not None:
-                segments.append(current)
+                gap_ms = row.abs_start_ms - current.last_abs_end_ms
+                same_species = row.species == current.species
+                within_gap = gap_ms <= gap_tolerance_ms
+
+                if same_species and within_gap:
+                    current.last_abs_end_ms = row.abs_end_ms
+                    current.end_sample = row.end_sample
+                    current.last_chunk_id = row.chunk_id
+                    current.chunk_ids.append(row.chunk_id)
+                    current.members.append(row)
+                    continue
+                else:
+                    segments.append(current)
+                    current = None
+
+            current = Segment(
+                species=row.species,
+                first_abs_start_ms=row.abs_start_ms,
+                last_abs_end_ms=row.abs_end_ms,
+                first_chunk_id=row.chunk_id,
+                last_chunk_id=row.chunk_id,
+                start_sample=row.start_sample,
+                end_sample=row.end_sample,
+                chunk_ids=[row.chunk_id],
+                members=[row],
+                file_stem=row.file_stem,
+                directory=row.directory
+            )
+        if current is not None:
+            segments.append(current)
         return segments
 
-
-    def make_segment_id(self, file_stem, start_sample, end_sample):
-        return f"{file_stem}_{start_sample}_{end_sample}"
-
+    def make_segment_id(self, first_chunk_id, last_chunk_id):
+        return f"{first_chunk_id}__{last_chunk_id}"
 
     def carve_segment_clips(self, segments, sanitize_species):
         cache = WavCache()
@@ -863,26 +879,36 @@ class BirdNetParser(BirdNetParserBase):
         written = []
         try:
             for seg in segments:
-                wf = cache.get(Path(self.audio_path / seg.directory), seg.file_stem)
-                params = cache.params(Path(self.audio_path / seg.directory), seg.file_stem)
+                all_data = bytearray()
+                wave_params = None
 
-                data = self.extract_segment_bytes(wf, params, seg.start_sample, seg.end_sample)
-                if not data:
-                    print(f"Skipping empty segment: {seg.file_stem} [{seg.start_sample}-{seg.end_sample}]")
+                for file_stem, file_members in groupby(seg.members, key=attrgetter("file_stem")):
+                    file_members = list(file_members)
+                    directory = file_members[0].directory
+                    wf = cache.get(Path(self.audio_path / directory), file_stem)
+                    params = cache.params(Path(self.audio_path / directory), file_stem)
+                    wave_params = wave_params or params
+
+                    data = self.extract_segment_bytes(wf, params, file_members[0].start_sample,
+                                                      file_members[-1].end_sample)
+                    if data:
+                        all_data.extend(data)
+
+                if not all_data:
+                    print(f"Skipping empty segment: {seg.first_chunk_id}-{seg.last_chunk_id}")
                     continue
 
-                segment_id = self.make_segment_id(seg.file_stem, seg.start_sample, seg.end_sample)
+                segment_id = self.make_segment_id(seg.first_chunk_id, seg.last_chunk_id)
                 species_slug = sanitize_species(seg.species)
                 out_path = Path(self.output_path) / f"{segment_id}_{species_slug}.wav"
 
                 with wave.open(str(out_path), "wb") as out_wf:
-                    out_wf.setnchannels(params.nchannels)
-                    out_wf.setsampwidth(params.sampwidth)
-                    out_wf.setframerate(params.framerate)
-                    out_wf.writeframes(data)
+                    out_wf.setnchannels(wave_params.nchannels)
+                    out_wf.setsampwidth(wave_params.sampwidth)
+                    out_wf.setframerate(wave_params.framerate)
+                    out_wf.writeframes(bytes(all_data))
 
                 written.append((segment_id, str(out_path)))
-
             return written
         finally:
             cache.close_all()
@@ -890,312 +916,11 @@ class BirdNetParser(BirdNetParserBase):
 
     def run_segment_detections(self):
         detections = self.fetch_all_detections()
-        segments = self.build_detection_segments(detections, gap_tolerance=GAP_TOLERANCE)
+        segments = self.build_detection_segments(detections, gap_tolerance_ms=GAP_TOLERANCE_MS)
 
         clips = self.carve_segment_clips(
-            segments,
+            segments=segments,
             sanitize_species=self.sanitize_for_filename,
         )
         print(clips)
 
-'''
-    def run_pipeline(self):
-        # GPU check
-        gpus = tf.config.list_physical_devices('GPU')
-        if gpus:
-            print(f"GPU detected: {gpus}\n")
-        else:
-            print("No GPU detected. Defaulting to CPU.\n")
-
-
-
-
-        gps = 10.6473347, 124.3891271
-        locations = self.get_regions(gps)
-        print(locations)
-        utilities = SQLServerUtilities(sp='sp_get_site', sql_server_connection=self.sqlserver_connection,
-                                       params_values=gps, params='@lat=?, @long=?', logger=self.logger)
-        site = utilities.run_sql_return_params()
-        print(site)
-
-
-
-        if self.analyze_file_group:
-            # doing a reanalysis now of existing files
-            source_audio_dir = self.audio_path / self.analyze_file_group
-            run_suffix = self.analysis_run_text
-        else:
-            # running new file group fom external drive
-            valid_extensions = {".wav", ".txt"}
-            for item in Path(self.external_drive).iterdir():
-                # Only process non-recursive files matching valid extensions
-                if item.is_file() and item.suffix.lower() in valid_extensions:
-                    if item.stat().st_size > 0:
-                        shutil.move(item, Path(self.audio_path) / item.name)
-                    else:
-                        item.unlink()
-
-            run_suffix = 'initial'
-
-
-
-
-        analysis_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-
-        output_path_results = Path(Path(self.output_path) / f"{first_file_name}_{analysis_timestamp}_{run_suffix}")
-        output_path_results.mkdir(parents=True, exist_ok=True)
-        detection_file_path = output_path_results / f"detection_results_{first_file_name}_{analysis_timestamp}_{run_suffix}.txt"
-
-        # Initialize the customized detector
-        print("Initializing customized species list analyzer...")
-        analyzer = Analyzer(custom_species_list_path=self.species_list_path)
-
-
-
-        all_embeddings = []
-        all_metadata = []
-        with open(detection_file_path, "w", encoding="utf-8") as f_out:
-            for index, file_path in enumerate(audio_files, 1):
-                print(f"[{index}/{len(audio_files)}] Processing: {file_path.name}...")
-                f_out.write(f"=== File: {file_path.name} ===\n")
-
-                try:
-                    detections, embeddings, metadata = self.extract_embeddings_and_detect(
-                        file_path, analyzer)
-
-                    if len(embeddings) > 0:
-                        all_embeddings.append(embeddings)
-                        all_metadata.extend(metadata)
-
-                    # Write text detections
-                    if not detections:
-                        f_out.write("No detections found.\n")
-                    else:
-                        for detection in detections:
-                            result_line = (
-                                f"Time: {detection['start_time']:.1f}s - {detection['end_time']:.1f}s | "
-                                f"Species: {detection['common_name']} ({detection['scientific_name']}) | "
-                                f"Confidence: {detection['confidence']:.2%}\n"
-                            )
-                            f_out.write(result_line)
-
-                except Exception as e:
-                    error_msg = f"Error processing {file_path.name}: {e}\n"
-                    f_out.write(error_msg)
-                    print(error_msg)
-
-                f_out.write("\n" + "=" * 50 + "\n\n")
-
-
-
-
-            if all_embeddings:
-                print("\n--- Running Dimensionality Reduction & Clustering ---")
-                X_all = np.vstack(all_embeddings)
-                df_all = pd.DataFrame(all_metadata)
-
-                # Only cluster chunks BirdNET did NOT confidently identify.
-                identified_mask = (df_all['birdnet_label'] == "Unidentified/Ambient").to_numpy() == False
-                X_identified = X_all[identified_mask]
-                X_unidentified = X_all[~identified_mask]
-                df_identified = df_all[identified_mask].copy()
-                df_unidentified = df_all[~identified_mask].copy()
-
-                print(f"{len(df_identified)} chunk(s) already identified by BirdNET -> skipping cluster analysis.")
-                print(f"{len(df_unidentified)} chunk(s) unidentified -> running cluster analysis on these only.")
-
-                if len(X_unidentified) > 0:
-                    # 1. Normalize embeddings (essential for cosine distance)
-                    norms = np.linalg.norm(X_unidentified, axis=1, keepdims=True)
-                    X_normalized = np.where(norms == 0, X_unidentified, X_unidentified / norms)
-
-                    # 2. Reduce to a moderate-dimensional space FIRST, then cluster on that.
-                    print("Reducing embeddings to 10-D with UMAP for clustering...")
-                    cluster_reducer = umap.UMAP(
-                        n_neighbors=self.umap.n_neighbors,
-                        min_dist=self.umap.min_distance,
-                        n_components=self.umap.n_components,
-                        metric=self.umap.metric,
-                        random_state=self.umap.random_state,
-                    )
-                    X_umap = cluster_reducer.fit_transform(X_normalized)
-
-                    np.save(
-                        output_path_results / f"embeddings_8d_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy",
-                        X_umap)
-                    np.save(
-                        output_path_results / f"embeddings_raw_{first_file_name}_{analysis_timestamp}_{run_suffix}.npy",
-                        X_normalized)
-      
-                    print("Clustering reduced embeddings with HDBSCAN...")
-                    clusterer = HDBSCAN(
-                        min_cluster_size=self.hdbscan_clusters.min_cluster_size,
-                        min_samples=self.hdbscan_clusters.min_samples,
-                        metric=self.hdbscan_clusters.cluster_metric,
-                        cluster_selection_epsilon=self.hdbscan_clusters.cluster_selection_epsilon,
-                    )
-                    cluster_labels = clusterer.fit_predict(X_umap)
-                    # 3. Separate UMAP run, purely for 2D visualization
-                    print("Projecting embeddings to 2D with UMAP for visualization...")
-                    viz_reducer = umap.UMAP(
-                        n_neighbors=self.umap_viz.n_neighbors,
-                        min_dist=self.umap_viz.min_distance,
-                        n_components=self.umap_viz.n_components,
-                        metric=self.umap_viz.metric,
-                        random_state=self.umap_viz.random_state,
-                    )
-                    X_2d = viz_reducer.fit_transform(X_normalized)
-
-                    df_unidentified['umap_x'] = X_2d[:, 0]
-                    df_unidentified['umap_y'] = X_2d[:, 1]
-                    df_unidentified['cluster'] = cluster_labels
-                else:
-                    print("No unidentified segments to cluster.")
-
-                # Identified rows don't need acoustic clustering — give each species its own "cluster" id.
-                if len(df_identified) > 0:
-                    df_identified['umap_x'] = np.nan
-                    df_identified['umap_y'] = np.nan
-                    df_identified['cluster'] = df_identified['birdnet_label'].apply(self.sanitize_for_filename)
-
-                df = pd.concat([df_identified, df_unidentified], ignore_index=True)
-                n_species = df.loc[df['birdnet_label'] != "Unidentified/Ambient", 'birdnet_label'].nunique()
-                n_tot_clusters = df.loc[df['cluster'] != -1, 'cluster'].nunique()  # excludes HDBSCAN noise (-1)
-                n_clusters = n_tot_clusters - n_species
-                total_audio_seconds_approx = len(all_metadata) * 3.0
-                noise_rows = df_unidentified[df_unidentified['cluster'] == -1]
-                noise_seconds = (noise_rows['end_time'] - noise_rows['start_time']).sum()
-                n_noise_chunks = len(noise_rows)
-                # Identified species (BirdNET-labeled)
-                species_seconds = (df_identified['end_time'] - df_identified['start_time']).sum()
-                n_species_chunks = len(df_identified)
-                clustered_rows = df_unidentified[df_unidentified['cluster'] != -1]
-                clustered_seconds = (clustered_rows['end_time'] - clustered_rows['start_time']).sum()
-                n_clustered_chunks = len(clustered_rows)
-
-                # Save the results
-                acoustic_results_path = output_path_results / f"acoustic_clusters_{first_file_name}_{analysis_timestamp}_{run_suffix}.csv"
-                df.to_csv(acoustic_results_path, index=False)
-                print(f"Clustering complete! Detailed data saved to: {acoustic_results_path}")
-
-                unidentified_clusters = df[(df['birdnet_label'] == "Unidentified/Ambient") & (df['cluster'] != -1)]
-                if not unidentified_clusters.empty:
-                    print(f"\n[AHA!] Found {len(unidentified_clusters)} unidentified segments that clustered together!")
-                    print(unidentified_clusters[['file', 'start_time', 'cluster']].head(10).to_string(index=False))
-                else:
-                    print("\nNo distinct clusters of unidentified audio found.")
-            else:
-                print(
-                    "\nNo valid embeddings extracted from the audio files. Skipping dimensionality reduction and clustering.")
-
-            if not self.analyze_file_group:
-                archive_dir_path = source_audio_dir / first_file_name
-                archive_dir_path.mkdir(parents=True, exist_ok=True)
-                for file_path in audio_files:
-                    try:
-                        destination = archive_dir_path / file_path.name
-                        shutil.move(str(file_path), str(destination))
-                    except Exception as e:
-                        print(f"Failed to move {file_path.name}: {e}")
-                # move the log files
-                for item in source_audio_dir.glob("*.txt"):
-                    shutil.move(item, archive_dir_path)
-            else:
-                archive_dir_path = source_audio_dir
-
-        # Now extract clusters and species
-        output_dir = Path(self.output_path)
-        run_folder_name = f"{first_file_name}_{analysis_timestamp}_{run_suffix}"
-        output_base = output_dir / run_folder_name
-        audio_archive = source_audio_dir / "processed" / first_file_name
-        cluster_csv = output_base / f"acoustic_clusters_{run_folder_name}.csv"
-        out_dir_species = output_base / "species"
-        out_dir_clusters = output_base / "clusters"
-        os.makedirs(out_dir_species, exist_ok=True)
-        os.makedirs(out_dir_clusters, exist_ok=True)
-
-        rows = self.read_rows(csv_path=cluster_csv)
-        if not rows:
-            sys.exit("No matching rows found in CSV after filtering.")
-
-        # Split rows into species vs ambient datasets
-        species_rows = [r for r in rows if not r["is_ambient"]]
-        ambient_rows = [r for r in rows if r["is_ambient"]]
-
-        # Group species rows by cluster
-        by_cluster_species = defaultdict(list)
-        for row in species_rows:
-            by_cluster_species[row["cluster"]].append(row)
-        for cluster in by_cluster_species:
-            by_cluster_species[cluster].sort(key=lambda r: (r["file"], r["start"]))
-
-        # Group ambient rows by cluster
-        by_cluster_ambient = defaultdict(list)
-        for row in ambient_rows:
-            by_cluster_ambient[row["cluster"]].append(row)
-        for cluster in by_cluster_ambient:
-            by_cluster_ambient[cluster].sort(key=lambda r: (r["file"], r["start"]))
-
-        cache = WavCache(archive_dir_path)
-
-        # Validate all referenced files share the same audio format up front
-        reference_params = None
-        reference_file = None
-        all_files = sorted({row["file"] for row in rows})
-        for fname in all_files:
-            params = cache.params(fname)
-            if reference_params is None:
-                reference_params = params
-                reference_file = fname
-            else:
-                if (params.framerate, params.sampwidth, params.nchannels) != \
-                        (reference_params.framerate, reference_params.sampwidth, reference_params.nchannels):
-                    sys.exit(
-                        f"Format mismatch: '{fname}' differs from '{reference_file}' format."
-                    )
-
-        framerate = reference_params.framerate
-        sampwidth = reference_params.sampwidth
-        nchannels = reference_params.nchannels
-        silence_frame = b"\x00" * (sampwidth * nchannels)
-        gap_frames = int(round((self.gap_ms / 1000.0) * framerate)) if self.gap_ms > 0 else 0
-        gap_bytes = silence_frame * gap_frames
-        audio_format_params = (nchannels, sampwidth, framerate)
-
-        # Processing Identified Species
-        if by_cluster_species:
-            print(
-                f"\nProcessing {len(species_rows)} identified-species segments across {len(by_cluster_species)} cluster(s)...")
-            self.write_cluster_wavs(by_cluster_species, cache, out_dir_species, FILE_PREFIX, MAX_SPECIES_NAME_LENGTH,
-                               audio_format_params, gap_bytes)
-        else:
-            print("\nNo identified-species segments found to export.")
-
-        # Processing Unidentified / Ambient
-        if by_cluster_ambient:
-            print(
-                f"\nProcessing {len(ambient_rows)} unidentified/ambient segments across {len(by_cluster_ambient)} cluster(s)...")
-            self.write_cluster_wavs(by_cluster_ambient, cache, out_dir_clusters, FILE_PREFIX, MAX_SPECIES_NAME_LENGTH,
-                               audio_format_params, gap_bytes)
-        else:
-            print("\nNo unidentified/ambient segments found to export.")
-
-        cache.close_all()
-
-        with open(output_path_results / "summary.txt", "a") as summary:
-            summary.write(str(total_audio_seconds_approx) + ' total seconds of audio analyzed\n')
-            summary.write(str(n_species) + ' species detected in ' + str(species_seconds) + ' seconds of audio\n')
-            summary.write(str(n_clusters) + ' additional unique clusters in ' + str(clustered_seconds) + ' seconds of audio\n')
-            summary.write(str(noise_seconds) + ' seconds of background noise\n\n')
-            summary.write('Species Detection Min confidence: ' + str(self.min_confidence) + '\n\n')
-            summary.write('Overlap: ' + str(self.overlap) + '\n\n')
-            summary.write('HDBSCAN Parameters used\n')
-            summary.write('Min cluster size: ' + str(self.hdbscan_clusters.min_cluster_size) + '\n')
-            summary.write('Min samples: ' + str(self.hdbscan_clusters.min_samples) + '\n')
-            summary.write('Metric: ' + str(self.hdbscan_clusters.cluster_metric) + '\n')
-            summary.write('Selection Epsilon: ' + str(self.hdbscan_clusters.cluster_selection_epsilon) + '\n')
-        summary.close()
-
-
-        print("\nDone.")
-'''
