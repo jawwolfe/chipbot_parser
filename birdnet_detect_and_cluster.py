@@ -27,7 +27,9 @@ from enum import Enum
 IGNORED_LABEL = "unidentified/ambient"
 DEFAULT_LAT = '39.8755985'
 DEFAULT_LONG = '-86.2844157'
+CLUSTER_ALGORITHM = 'HDBSCAN'
 
+@dataclass
 class ClusterChunkRow:
     chunk_id: str
     run_id: int
@@ -723,7 +725,6 @@ class BirdNetParser(BirdNetParserBase):
         }
 
         params_json_payload = json.dumps(jconfig_payload, default=vars)
-        my_algorithm = 'HDBSCAN'
 
         sql='Select c.[ChunkID], ce.VectorBlob '
         sql+='from Chunks c '
@@ -797,7 +798,7 @@ class BirdNetParser(BirdNetParserBase):
         counts_dict = df["cluster"].value_counts().to_dict()
 
         # enter run
-        run_params = (my_algorithm, params_json_payload, float(self.birdnet_model_version), only_unidentified,
+        run_params = (CLUSTER_ALGORITHM, params_json_payload, float(self.birdnet_model_version), only_unidentified,
                       len(records), start_date, end_date, level_1, level_2, level_3, batch, "", None)
         utilities = SQLServerUtilities(sp='sp_insert_run',
                                        sql_server_connection=self.sqlserver_connection, params_values=run_params,
@@ -833,6 +834,7 @@ class BirdNetParser(BirdNetParserBase):
                                                                             '@ClusterProbability=?, @UmapX=?, @UmapY=?, '
                                                                             '@RunID=?', logger=self.logger)
         utilities.run_sql_bulk_params()
+        self.run_cluster_segmentation(run_id)
 
 
     def parse_chunk_id(self, chunk_id: str) -> tuple[str, int]:
@@ -842,10 +844,59 @@ class BirdNetParser(BirdNetParserBase):
 
     def run_cluster_segmentation(self, run_id):
         params = (run_id, self.gap_tolerance_ms, self.min_cluster_probability)
-        utilities = SQLServerUtilities(sp='sp_get_cluster_segment_data', sql_server_connection=self.sqlserver_connection,
-                                       params_values=params, params='@RunID=?, @GapToleranceSeconds=?, '
-                                                                    '@MinClusterProbability=?', logger=self.logger)
-        cluster_segments = utilities.run_sql_return_params()
+        utilities = SQLServerUtilities(sp='sp_get_cluster_segment_data',
+                                       sql_server_connection=self.sqlserver_connection,
+                                       params_values=params,
+                                       params='@RunID=?, @GapToleranceMS=?, @MinClusterProbability=?',
+                                       logger=self.logger)
+        rows = utilities.run_sql_return_params()
+
+        columns = ['RunID', 'ClusterID', 'ChunkID', 'ClusterProbability', 'DeviceName',
+                   'FileName', 'ChunkIndex', 'AbsStartMS', 'AbsEndMS', 'SegmentGroupID']
+        df = pd.DataFrame.from_records(rows, columns=columns)
+
+        segments = []
+        for (grp_run_id, cluster_id, segment_group_id), group_df in df.groupby(
+                ['RunID', 'ClusterID', 'SegmentGroupID']):
+            group_df = group_df.sort_values('AbsStartMS')
+
+            members = [
+                ClusterChunkRow(
+                    chunk_id=row.ChunkID,
+                    run_id=row.RunID,
+                    cluster_id=row.ClusterID,
+                    cluster_probability=row.ClusterProbability,
+                    file_stem=row.FileName,
+                    chunk_index=row.ChunkIndex,
+                    abs_start_ms=int(row.AbsStartMS.timestamp() * 1000),
+                    abs_end_ms=int(row.AbsEndMS.timestamp() * 1000),
+                    start_datetime=row.AbsStartMS,
+                    end_datetime=row.AbsEndMS,
+                    directory=None,  # not returned by the SP yet — see note below
+                    device=row.DeviceName,
+                )
+                for row in group_df.itertuples()
+            ]
+
+            segments.append(Segment(
+                segment_type=SegmentType.CLUSTER,
+                file_stem=members[0].file_stem,
+                first_abs_start_ms=members[0].abs_start_ms,
+                last_abs_end_ms=members[-1].abs_end_ms,
+                first_datetime=members[0].start_datetime,
+                last_datetime=members[-1].end_datetime,
+                first_chunk_id=members[0].chunk_id,
+                last_chunk_id=members[-1].chunk_id,
+                chunk_ids=[m.chunk_id for m in members],
+                directory=members[0].directory,
+                device=members[0].device,
+                members=members,
+                run_id=grp_run_id,
+                cluster_id=cluster_id,
+                avg_cluster_probability=group_df['ClusterProbability'].mean(),
+            ))
+        for segment in segments:
+            self._commit_segment(segment)
 
 
 
@@ -893,16 +944,33 @@ class BirdNetParser(BirdNetParserBase):
                                                params_values= my_params,
                                                params='@SegmentID=?, @ChunkID=?, @Position=?', logger=self.logger)
                 utilities.run_sql_params()
-                detection_id = current.members[0].detection_id
-                my_params = (detection_id, segment_id)
-                utilities = SQLServerUtilities(sp='sp_insert_segment_detection',
-                                               sql_server_connection=self.sqlserver_connection,
-                                               params_values=my_params,
-                                               params='@DetectionID=?, @SegmentID=?', logger=self.logger)
-                try:
-                    utilities.run_sql_params()
-                except DatabaseIntegrityException as err:
-                    self.logger.error("Duplicate segment detection commit rolled back.")
+
+                if current.segment_type == SegmentType.DETECTION:
+                    utilities.run_sql_return_params()
+                    detection_id = current.members[0].detection_id
+                    my_params = (detection_id, segment_id)
+                    utilities = SQLServerUtilities(sp='sp_insert_segment_detection',
+                                                   sql_server_connection=self.sqlserver_connection,
+                                                   params_values=my_params,
+                                                   params='@DetectionID=?, @SegmentID=?', logger=self.logger)
+                    try:
+                        utilities.run_sql_params()
+                    except DatabaseIntegrityException as err:
+                        self.logger.error("Duplicate segment detection commit rolled back.")
+
+                if current.segment_type == SegmentType.CLUSTER:
+                    cluster_id = current.members[0].cluster_id
+                    my_params = (cluster_id, segment_id, current.avg_cluster_probability)
+                    utilities = SQLServerUtilities(sp='sp_insert_segment_cluster',
+                                                   sql_server_connection=self.sqlserver_connection,
+                                                   params_values=my_params,
+                                                   params='@ClusterID=?, @SegmentID=?, @MeanClusterProbability=?',
+                                                   logger=self.logger)
+                    try:
+                        utilities.run_sql_params()
+                    except DatabaseIntegrityException as err:
+                        self.logger.error("Duplicate cluster segment commit rolled back.")
+
 
     def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance_ms: int | None = None) -> list[Segment]:
         if gap_tolerance_ms is None:

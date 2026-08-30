@@ -95,3 +95,4 @@ parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_
 #                        index_name="chipbot-birdnet-24", batch_start='2026-07-17-200624', batch_end='2026-07-18-082620')
 parse.clusterer(site_list=[55], only_unidentified=True)
 #parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
+#parse.run_cluster_segmentation(7)
