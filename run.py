@@ -1,6 +1,8 @@
 from birdnet_detect_and_cluster import BirdNetParser
 from configs import config
 from pathlib import Path
+
+from configs.config_sample import MIN_CLUSTER_PROBABILITY
 from ml_parameters.ml_parameters import UMAPParams, HDBSCANClusters
 from connection import SQLServerConnection
 import datetime, logging
@@ -39,6 +41,7 @@ SQLSERVER_KEY = config.SQLSERVER_KEY
 PINECONE_KEY = config.PINECONE_KEY
 BIRDNET_MODEL_VERSION = config.BIRDNET_MODEL_VERSION
 GAP_TOLERANCE_MS = config.GAP_TOLERANCE_MS
+MIN_CLUSTER_PROBABILITY = config.MIN_CLUSTER_PROBABILITY
 
 
 def initialize_logger():
@@ -86,10 +89,9 @@ parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
                       analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP,
                       sqlserver_connection=initialize_sqlserver(), pinecone_key=PINECONE_KEY,
-                      birdnet_model_version=BIRDNET_MODEL_VERSION)
+                      birdnet_model_version=BIRDNET_MODEL_VERSION, min_cluster_probability=MIN_CLUSTER_PROBABILITY)
 
 #parse.extract_and_store(source_audio_dir=AUDIO_PATH / "United-States_Indiana_Indianapolis-House-Backyard_2026-07-17-200624_2026-07-18-082620",
 #                        index_name="chipbot-birdnet-24", batch_start='2026-07-17-200624', batch_end='2026-07-18-082620')
-#parse.clusterer(site_list=[55], only_unidentified=True)
-#parse.import_file_batch()
-parse.run_segment_detections()
+parse.clusterer(site_list=[55], only_unidentified=True)
+#parse.import_file_batch() # does everything from files import, embedding, and detection segmentation

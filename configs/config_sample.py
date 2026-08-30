@@ -41,3 +41,4 @@ SQLSERVER_TOKEN = ''
 SQLSERVER_KEY = ''
 SPECIES_IGNORE_2022_TAX = ['Red Junglefowl (Gallus gallus)', 'Red Junglefowl (Domestic type) (Gallus gallus (Domestic type))']
 GAP_TOLERANCE_MS = 9000
+MIN_CLUSTER_PROBABILITY = 0.65

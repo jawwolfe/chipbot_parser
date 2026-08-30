@@ -22,10 +22,25 @@ from itertools import groupby
 from operator import attrgetter
 from dataclasses import dataclass
 from typing import Optional
+from enum import Enum
 
 IGNORED_LABEL = "unidentified/ambient"
 DEFAULT_LAT = '39.8755985'
 DEFAULT_LONG = '-86.2844157'
+
+class ClusterChunkRow:
+    chunk_id: str
+    run_id: int
+    cluster_id: int
+    cluster_probability: float
+    file_stem: str
+    chunk_index: int
+    abs_start_ms: int
+    abs_end_ms: int
+    start_datetime: datetime
+    end_datetime: datetime
+    directory: str
+    device: str
 
 @dataclass
 class DetectionRow:
@@ -36,31 +51,39 @@ class DetectionRow:
     confidence: float
     start_sample: int
     end_sample: int
-    file_stem: str      # parsed from chunk_id
-    chunk_index: int    # parsed from chunk_id
-    abs_start_ms: int   # new
+    file_stem: str
+    chunk_index: int
+    abs_start_ms: int
     abs_end_ms: int
     start_datetime: datetime
     end_datetime: datetime
     directory: str
     device: str
 
+class SegmentType(Enum):
+    DETECTION = "detection"
+    CLUSTER = "cluster"
+
 @dataclass
 class Segment:
+    segment_type: SegmentType
     file_stem: str
-    species: str
     first_abs_start_ms: int
     last_abs_end_ms: int
     first_datetime: datetime
     last_datetime: datetime
-    start_sample: int
-    end_sample: int
     first_chunk_id: str
     last_chunk_id: str
-    chunk_ids: list  # all chunks included, for embedding pooling later
-    members: list[DetectionRow]
+    chunk_ids: list
     directory: str
     device: str
+    members: list  # list[DetectionRow] or list[ClusterChunkRow], depending on segment_type
+    # detection-only
+    species: str | None = None
+    # cluster-only
+    run_id: int | None = None
+    cluster_id: int | None = None
+    avg_cluster_probability: float | None = None
 
 class BirdNetParserBase:
     def __init__(self, logger):
@@ -95,7 +118,7 @@ class WavCache:
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, output_path, min_confidence, overlap,
                  species_list, gap_tolerance_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group,
-                 sqlserver_connection, pinecone_key, birdnet_model_version):
+                 sqlserver_connection, pinecone_key, birdnet_model_version, min_cluster_probability):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.output_path = output_path
@@ -103,6 +126,7 @@ class BirdNetParser(BirdNetParserBase):
         self.overlap = overlap
         self.species_list_path = species_list
         self.gap_tolerance_ms = gap_tolerance_ms
+        self.min_cluster_probability = min_cluster_probability
         self.umap = umap
         self.umap_viz = umap_viz
         self.hdbscan_clusters = hdbscan_clusters
@@ -685,6 +709,8 @@ class BirdNetParser(BirdNetParserBase):
             self.logger.info("Begin Birdnet Embedding and Database insert.")
             # now insert all embeddings for this batch into SQL Server
             self.extract_and_store(source_audio_dir=archive_dir)
+            detections = self.fetch_all_detections(batch_id)
+            segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
 
 
     def clusterer(self, batch=None, only_unidentified=True, start_date=None, end_date=None,
@@ -814,10 +840,20 @@ class BirdNetParser(BirdNetParserBase):
         return file_stem, int(index_str)
 
 
-    def fetch_all_detections(self) -> list[DetectionRow]:
+    def run_cluster_segmentation(self, run_id):
+        params = (run_id, self.gap_tolerance_ms, self.min_cluster_probability)
+        utilities = SQLServerUtilities(sp='sp_get_cluster_segment_data', sql_server_connection=self.sqlserver_connection,
+                                       params_values=params, params='@RunID=?, @GapToleranceSeconds=?, '
+                                                                    '@MinClusterProbability=?', logger=self.logger)
+        cluster_segments = utilities.run_sql_return_params()
+
+
+
+    def fetch_all_detections(self, batch_id) -> list[DetectionRow]:
+        params = (batch_id)
         utilities = SQLServerUtilities(sp='sp_get_all_detections', sql_server_connection=self.sqlserver_connection,
-                                       logger=self.logger)
-        detections = utilities.run_sql_return_no_params()
+                                       params_values=params, params='@BatchID=?', logger=self.logger)
+        detections = utilities.run_sql_return_params()
         rows = []
 
         for item in detections:
@@ -898,8 +934,6 @@ class BirdNetParser(BirdNetParserBase):
                 last_abs_end_ms=row.abs_end_ms,
                 first_chunk_id=row.chunk_id,
                 last_chunk_id=row.chunk_id,
-                start_sample=row.start_sample,
-                end_sample=row.end_sample,
                 chunk_ids=[row.chunk_id],
                 members=[row],
                 file_stem=row.file_stem,
