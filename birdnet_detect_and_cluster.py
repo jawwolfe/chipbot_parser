@@ -713,6 +713,10 @@ class BirdNetParser(BirdNetParserBase):
             self.extract_and_store(source_audio_dir=archive_dir)
             detections = self.fetch_all_detections(batch_id)
             segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
+            written = self.carve_segment_clips(
+                segments_detections,
+                make_name=lambda seg: self._detection_clip_name(seg, self.sanitize_for_filename),
+            )
 
 
     def clusterer(self, batch=None, only_unidentified=True, start_date=None, end_date=None,
@@ -834,7 +838,11 @@ class BirdNetParser(BirdNetParserBase):
                                                                             '@ClusterProbability=?, @UmapX=?, @UmapY=?, '
                                                                             '@RunID=?', logger=self.logger)
         utilities.run_sql_bulk_params()
-        self.run_cluster_segmentation(run_id)
+        segments = self.run_cluster_segmentation(run_id)
+        written = self.carve_segment_clips(
+            segments,
+            make_name=self._cluster_clip_name,
+        )
 
 
     def parse_chunk_id(self, chunk_id: str) -> tuple[str, int]:
@@ -897,7 +905,7 @@ class BirdNetParser(BirdNetParserBase):
             ))
         for segment in segments:
             self._commit_segment(segment)
-
+        return segments
 
 
     def fetch_all_detections(self, batch_id) -> list[DetectionRow]:
@@ -924,11 +932,16 @@ class BirdNetParser(BirdNetParserBase):
     def _commit_segment(self, current: Segment) -> None:
         dup_seg = False
         segment_id = None
-        run_params = (current.device, current.first_datetime, current.last_datetime, len(current.chunk_ids), None)
+        if current.segment_type == SegmentType.CLUSTER:
+            run_params = (current.device, current.first_datetime, current.last_datetime, len(current.chunk_ids), None,
+                          current.run_id)
+        else:
+            run_params = (current.device, current.first_datetime, current.last_datetime, len(current.chunk_ids), None,
+                          None)
         utilities = SQLServerUtilities(sp='sp_insert_segment',
                                        sql_server_connection=self.sqlserver_connection,
                                        params_values=run_params,
-                                       params='@DeviceName=?, @StartTime=?, @EndTime=?, @ChunkCount=?, '
+                                       params='@DeviceName=?, @StartTime=?, @EndTime=?, @ChunkCount=?, @RunID=? '
                                               '@NewSegmentID=? OUTPUT', logger=self.logger)
         try:
             segment_id = utilities.run_sql_return_params()[0][0]
@@ -1019,7 +1032,19 @@ class BirdNetParser(BirdNetParserBase):
     def make_segment_id(self, first_chunk_id, last_chunk_id):
         return f"{first_chunk_id}__{last_chunk_id}"
 
-    def carve_segment_clips(self, segments, sanitize_species):
+
+    def _detection_clip_name(self, seg, sanitize_species):
+        segment_id = self.make_segment_id(seg.first_chunk_id, seg.last_chunk_id)
+        species_slug = sanitize_species(seg.species)
+        return f"{segment_id}_{species_slug}"
+
+
+    def _cluster_clip_name(self, seg):
+        segment_id = self.make_segment_id(seg.first_chunk_id, seg.last_chunk_id)
+        return f"{seg.run_id}_{seg.cluster_id}_{segment_id}"
+
+
+    def carve_segment_clips(self, segments, make_name):
         cache = WavCache()
         os.makedirs(self.output_path, exist_ok=True)
         written = []
@@ -1044,9 +1069,8 @@ class BirdNetParser(BirdNetParserBase):
                     print(f"Skipping empty segment: {seg.first_chunk_id}-{seg.last_chunk_id}")
                     continue
 
-                segment_id = self.make_segment_id(seg.first_chunk_id, seg.last_chunk_id)
-                species_slug = sanitize_species(seg.species)
-                out_path = Path(self.output_path) / f"{segment_id}_{species_slug}.wav"
+                base_name = make_name(seg)
+                out_path = Path(self.output_path) / f"{base_name}.wav"
 
                 with wave.open(str(out_path), "wb") as out_wf:
                     out_wf.setnchannels(wave_params.nchannels)
@@ -1054,7 +1078,7 @@ class BirdNetParser(BirdNetParserBase):
                     out_wf.setframerate(wave_params.framerate)
                     out_wf.writeframes(bytes(all_data))
 
-                written.append((segment_id, str(out_path)))
+                written.append((base_name, str(out_path)))
             return written
         finally:
             cache.close_all()
@@ -1063,10 +1087,10 @@ class BirdNetParser(BirdNetParserBase):
     def run_segment_detections(self):
         detections = self.fetch_all_detections()
         segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
-        sys.exit()
+
         clips = self.carve_segment_clips(
             segments=segments_detections,
-            sanitize_species=self.sanitize_for_filename,
+            sanitize_species=self.sanitize_for_filename
         )
         print(clips)
 
