@@ -10,7 +10,6 @@ from birdnetlib import Recording
 from birdnetlib.analyzer import Analyzer
 import shutil, os, csv, sys, wave, re, json
 from datetime import datetime, timedelta, timezone
-from collections import defaultdict
 import requests
 from mu_utilities.utilities import SQLServerUtilities
 from mu_utilities.exceptions import DatabaseIntegrityException
@@ -24,13 +23,9 @@ from operator import attrgetter
 from dataclasses import dataclass
 from typing import Optional
 
-FILE_PREFIX = "cluster_"
-MAX_SPECIES_NAME_LENGTH = 120
 IGNORED_LABEL = "unidentified/ambient"
 DEFAULT_LAT = '39.8755985'
 DEFAULT_LONG = '-86.2844157'
-GAP_TOLERANCE = 2  # tune as needed
-GAP_TOLERANCE_MS = 9000
 
 @dataclass
 class DetectionRow:
@@ -99,7 +94,7 @@ class WavCache:
 
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, output_path, min_confidence, overlap,
-                 species_list, gap_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group,
+                 species_list, gap_tolerance_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text, analyze_file_group,
                  sqlserver_connection, pinecone_key, birdnet_model_version):
         self.external_drive = external_drive
         self.audio_path = audio_path
@@ -107,7 +102,7 @@ class BirdNetParser(BirdNetParserBase):
         self.min_confidence = min_confidence
         self.overlap = overlap
         self.species_list_path = species_list
-        self.gap_ms = gap_ms
+        self.gap_tolerance_ms = gap_tolerance_ms
         self.umap = umap
         self.umap_viz = umap_viz
         self.hdbscan_clusters = hdbscan_clusters
@@ -873,9 +868,9 @@ class BirdNetParser(BirdNetParserBase):
                 except DatabaseIntegrityException as err:
                     self.logger.error("Duplicate segment detection commit rolled back.")
 
-
-    def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance_ms: int = GAP_TOLERANCE_MS) -> \
-                                 list[Segment]:
+    def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance_ms: int | None = None) -> list[Segment]:
+        if gap_tolerance_ms is None:
+            gap_tolerance_ms = self.gap_tolerance_ms
         segments: list[Segment] = []
         current: Optional[Segment] = None
         for row in detections:
@@ -965,7 +960,7 @@ class BirdNetParser(BirdNetParserBase):
 
     def run_segment_detections(self):
         detections = self.fetch_all_detections()
-        segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=GAP_TOLERANCE_MS)
+        segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
         sys.exit()
         clips = self.carve_segment_clips(
             segments=segments_detections,

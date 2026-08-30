@@ -15,7 +15,6 @@ OUTPUT_PATH = config.ROOT_DATA_PATH / Path("Output")
 SPECIES_LIST = config.ROOT_DATA_PATH / Path("species") / config.SPECIES_LIST
 MIN_CONFIDENCE = config.MIN_CONFIDENCE
 OVERLAP = config.OVERLAP
-GAP_MS = config.GAP_MS
 MIN_CLUSTER_SIZE = config.MIN_CLUSTER_SIZE
 MIN_SAMPLES = config.MIN_SAMPLES
 CLUSTER_METRIC = config.CLUSTER_METRIC
@@ -39,6 +38,7 @@ SQLSERVER_TOKEN = config.SQLSERVER_TOKEN
 SQLSERVER_KEY = config.SQLSERVER_KEY
 PINECONE_KEY = config.PINECONE_KEY
 BIRDNET_MODEL_VERSION = config.BIRDNET_MODEL_VERSION
+GAP_TOLERANCE_MS = config.GAP_TOLERANCE_MS
 
 
 def initialize_logger():
@@ -82,7 +82,7 @@ m = initialize_sqlserver()
 parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_path=OUTPUT_PATH,
                       min_confidence=MIN_CONFIDENCE, species_list=SPECIES_LIST,
                       external_drive=EXTERNAL_DRIVE,
-                      gap_ms=GAP_MS, umap=initialize_umap(), umap_viz=initialize_umap_viz(),
+                      gap_tolerance_ms=GAP_TOLERANCE_MS, umap=initialize_umap(), umap_viz=initialize_umap_viz(),
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
                       analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP,
                       sqlserver_connection=initialize_sqlserver(), pinecone_key=PINECONE_KEY,
