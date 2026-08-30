@@ -45,7 +45,10 @@ class DetectionRow:
     chunk_index: int    # parsed from chunk_id
     abs_start_ms: int   # new
     abs_end_ms: int
+    start_datetime: datetime
+    end_datetime: datetime
     directory: str
+    device: str
 
 @dataclass
 class Segment:
@@ -53,6 +56,8 @@ class Segment:
     species: str
     first_abs_start_ms: int
     last_abs_end_ms: int
+    first_datetime: datetime
+    last_datetime: datetime
     start_sample: int
     end_sample: int
     first_chunk_id: str
@@ -60,6 +65,7 @@ class Segment:
     chunk_ids: list  # all chunks included, for embedding pooling later
     members: list[DetectionRow]
     directory: str
+    device: str
 
 class BirdNetParserBase:
     def __init__(self, logger):
@@ -826,16 +832,52 @@ class BirdNetParser(BirdNetParserBase):
             rows.append(DetectionRow(
                 detection_id=item[0], chunk_id=item[1], model_id=item[2], species=item[3], confidence=item[4],
                 start_sample=item[5], end_sample=item[6], file_stem=file_stem, chunk_index=chunk_index,
-                abs_start_ms=abs_start_ms, abs_end_ms=abs_end_ms, directory=item[7]
+                abs_start_ms=abs_start_ms, abs_end_ms=abs_end_ms, directory=item[7], start_datetime=item[8],
+                end_datetime=item[9], device=item[10]
             ))
-        rows.sort(key=lambda r: (r.file_stem, r.abs_start_ms))
+        rows.sort(key=lambda r: (r.abs_start_ms))
         return rows
 
+
+    def _commit_segment(self, current: Segment) -> None:
+        dup_seg = False
+        segment_id = None
+        run_params = (current.device, current.first_datetime, current.last_datetime, len(current.chunk_ids), None)
+        utilities = SQLServerUtilities(sp='sp_insert_segment',
+                                       sql_server_connection=self.sqlserver_connection,
+                                       params_values=run_params,
+                                       params='@DeviceName=?, @StartTime=?, @EndTime=?, @ChunkCount=?, '
+                                              '@NewSegmentID=? OUTPUT', logger=self.logger)
+        try:
+            segment_id = utilities.run_sql_return_params()[0][0]
+        except DatabaseIntegrityException as err:
+            self.logger.error("Duplicate segment commit rolled back.")
+            dup_seg = True
+
+        if not dup_seg:
+            for index, value in enumerate(current.chunk_ids):
+                my_params = (segment_id, value, index)
+                utilities = SQLServerUtilities(sp='sp_insert_segment_chunk',
+                                               sql_server_connection=self.sqlserver_connection,
+                                               params_values= my_params,
+                                               params='@SegmentID=?, @ChunkID=?, @Position=?', logger=self.logger)
+                utilities.run_sql_params()
+                detection_id = current.members[0].detection_id
+                my_params = (detection_id, segment_id)
+                utilities = SQLServerUtilities(sp='sp_insert_segment_detection',
+                                               sql_server_connection=self.sqlserver_connection,
+                                               params_values=my_params,
+                                               params='@DetectionID=?, @SegmentID=?', logger=self.logger)
+                try:
+                    utilities.run_sql_params()
+                except DatabaseIntegrityException as err:
+                    self.logger.error("Duplicate segment detection commit rolled back.")
+
+
     def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance_ms: int = GAP_TOLERANCE_MS) -> \
-    list[Segment]:
+                                 list[Segment]:
         segments: list[Segment] = []
         current: Optional[Segment] = None
-
         for row in detections:
             if current is not None:
                 gap_ms = row.abs_start_ms - current.last_abs_end_ms
@@ -844,12 +886,14 @@ class BirdNetParser(BirdNetParserBase):
 
                 if same_species and within_gap:
                     current.last_abs_end_ms = row.abs_end_ms
+                    current.last_datetime = row.end_datetime
                     current.end_sample = row.end_sample
                     current.last_chunk_id = row.chunk_id
                     current.chunk_ids.append(row.chunk_id)
                     current.members.append(row)
                     continue
                 else:
+                    self._commit_segment(current)
                     segments.append(current)
                     current = None
 
@@ -864,10 +908,15 @@ class BirdNetParser(BirdNetParserBase):
                 chunk_ids=[row.chunk_id],
                 members=[row],
                 file_stem=row.file_stem,
-                directory=row.directory
+                directory=row.directory,
+                first_datetime=row.start_datetime,
+                last_datetime=row.end_datetime,
+                device=row.device
             )
         if current is not None:
+            self._commit_segment(current)
             segments.append(current)
+
         return segments
 
     def make_segment_id(self, first_chunk_id, last_chunk_id):
