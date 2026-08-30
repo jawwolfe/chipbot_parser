@@ -965,10 +965,10 @@ class BirdNetParser(BirdNetParserBase):
 
     def run_segment_detections(self):
         detections = self.fetch_all_detections()
-        segments = self.build_detection_segments(detections, gap_tolerance_ms=GAP_TOLERANCE_MS)
-
+        segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=GAP_TOLERANCE_MS)
+        sys.exit()
         clips = self.carve_segment_clips(
-            segments=segments,
+            segments=segments_detections,
             sanitize_species=self.sanitize_for_filename,
         )
         print(clips)
