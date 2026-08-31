@@ -13,7 +13,8 @@ LOG_MESSAGE = '%(asctime)s -%(process)d - %(levelname)s - %(message)s'
 LOG_TIME = '%d-%b-%y %H:%M:%S'
 EXTERNAL_DRIVE = config.EXTERNAL_DRIVE
 AUDIO_PATH = config.ROOT_DATA_PATH / Path("Input")
-OUTPUT_PATH = config.ROOT_DATA_PATH / Path("Output")
+OUTPUT_PATH_CLUSTERS = config.ROOT_DATA_PATH / Path("output_clusters")
+OUTPUT_PATH_DETECTIONS = config.ROOT_DATA_PATH / Path("output_detections")
 SPECIES_LIST = config.ROOT_DATA_PATH / Path("species") / config.SPECIES_LIST
 MIN_CONFIDENCE = config.MIN_CONFIDENCE
 OVERLAP = config.OVERLAP
@@ -82,17 +83,17 @@ def initialize_sqlserver():
 m = initialize_sqlserver()
 
 
-parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_path=OUTPUT_PATH,
+parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_path_clusters=OUTPUT_PATH_CLUSTERS,
                       min_confidence=MIN_CONFIDENCE, species_list=SPECIES_LIST,
-                      external_drive=EXTERNAL_DRIVE,
+                      external_drive=EXTERNAL_DRIVE, output_path_detections=OUTPUT_PATH_DETECTIONS,
                       gap_tolerance_ms=GAP_TOLERANCE_MS, umap=initialize_umap(), umap_viz=initialize_umap_viz(),
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
                       analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP,
                       sqlserver_connection=initialize_sqlserver(), pinecone_key=PINECONE_KEY,
                       birdnet_model_version=BIRDNET_MODEL_VERSION, min_cluster_probability=MIN_CLUSTER_PROBABILITY)
 
-#parse.extract_and_store(source_audio_dir=AUDIO_PATH / "United-States_Indiana_Indianapolis-House-Backyard_2026-07-17-200624_2026-07-18-082620",
-#                        index_name="chipbot-birdnet-24", batch_start='2026-07-17-200624', batch_end='2026-07-18-082620')
+
 #parse.clusterer(site_list=[55], only_unidentified=True)
 #parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
-parse.run_cluster_segmentation(8)
+#parse.run_cluster_segmentation(8)
+parse.process()
