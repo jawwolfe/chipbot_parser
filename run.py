@@ -93,7 +93,7 @@ parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_
                       birdnet_model_version=BIRDNET_MODEL_VERSION, min_cluster_probability=MIN_CLUSTER_PROBABILITY)
 
 
-#parse.clusterer(site_list=[55], only_unidentified=True)
+parse.clusterer(site_list=[55])
 #parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
 #parse.run_cluster_segmentation(8)
-parse.process()
+#parse.process()
