@@ -721,9 +721,6 @@ class BirdNetParser(BirdNetParserBase):
             clips_root = Path(self.output_path_detections)  # wherever your base clips folder lives
             detection_out = clips_root / Path(segments_detections[0].directory)
             detection_out.mkdir(parents=True, exist_ok=True)
-            for f in detection_out.iterdir():
-                if f.is_file():
-                    f.unlink()
             written_detections = self.carve_segment_clips(
                 segments_detections,
                 detection_out,
@@ -737,9 +734,6 @@ class BirdNetParser(BirdNetParserBase):
         clips_root = Path(self.output_path_detections)  # wherever your base clips folder lives
         detection_out = clips_root / Path(segments_detections[0].directory)
         detection_out.mkdir(parents=True, exist_ok=True)
-        for f in detection_out.iterdir():
-            if f.is_file():
-                f.unlink()
         written_detections = self.carve_segment_clips(
             segments_detections,
             detection_out,
@@ -868,7 +862,7 @@ class BirdNetParser(BirdNetParserBase):
         segments = self.run_cluster_segmentation(run_id)
 
         clips_root = Path(self.output_path_clusters)  # wherever your base clips folder lives
-        cluster_out = clips_root / Path("run_id_" + str(segments[0].run_id))
+        cluster_out = clips_root
         # todo create a file with parameters and location/sites/dates
         cluster_out.mkdir(parents=True, exist_ok=True)
 
@@ -967,10 +961,7 @@ class BirdNetParser(BirdNetParserBase):
         rows.sort(key=lambda r: (r.abs_start_ms))
         return rows
 
-
     def _commit_segment(self, current: Segment) -> None:
-        dup_seg = False
-        segment_id = None
         run_params = (current.device, current.first_datetime, current.last_datetime, len(current.chunk_ids), None)
         utilities = SQLServerUtilities(sp='sp_insert_segment',
                                        sql_server_connection=self.sqlserver_connection,
@@ -979,45 +970,55 @@ class BirdNetParser(BirdNetParserBase):
                                               '@NewSegmentID=? OUTPUT', logger=self.logger)
         try:
             segment_id = utilities.run_sql_return_params()[0][0]
-        except DatabaseIntegrityException as err:
+            is_new_segment = True
+        except DatabaseIntegrityException:
             self.logger.error("Duplicate segment commit rolled back.")
-            dup_seg = True
+            run_params = (current.device, current.first_datetime, current.last_datetime)
+            utilities = SQLServerUtilities(sp='sp_get_segment_id',
+                                           sql_server_connection=self.sqlserver_connection,
+                                           params_values=run_params,
+                                           params='@DeviceName=?, @StartTime=?, @EndTime=?', logger=self.logger)
+            segment_id = utilities.run_sql_return_params()[0][0]
+            is_new_segment = False
 
-        if not dup_seg:
+        if segment_id is None:
+            self.logger.error("Could not resolve segment_id for duplicate segment; skipping.")
+            return None
+
+        if is_new_segment:
             for index, value in enumerate(current.chunk_ids):
                 my_params = (segment_id, value, index)
                 utilities = SQLServerUtilities(sp='sp_insert_segment_chunk',
                                                sql_server_connection=self.sqlserver_connection,
-                                               params_values= my_params,
+                                               params_values=my_params,
                                                params='@SegmentID=?, @ChunkID=?, @Position=?', logger=self.logger)
                 utilities.run_sql_params()
 
-                if current.segment_type == SegmentType.DETECTION:
-                    detection_id = current.members[0].detection_id
-                    my_params = (detection_id, segment_id)
-                    utilities = SQLServerUtilities(sp='sp_insert_segment_detection',
-                                                   sql_server_connection=self.sqlserver_connection,
-                                                   params_values=my_params,
-                                                   params='@DetectionID=?, @SegmentID=?', logger=self.logger)
-                    try:
-                        utilities.run_sql_params()
-                    except DatabaseIntegrityException as err:
-                        self.logger.error("Duplicate segment detection commit rolled back.")
+        if current.segment_type == SegmentType.DETECTION:
+            detection_id = current.members[0].detection_id
+            my_params = (detection_id, segment_id)
+            utilities = SQLServerUtilities(sp='sp_insert_segment_detection',
+                                           sql_server_connection=self.sqlserver_connection,
+                                           params_values=my_params,
+                                           params='@DetectionID=?, @SegmentID=?', logger=self.logger)
+            try:
+                utilities.run_sql_params()
+            except DatabaseIntegrityException:
+                self.logger.error("Duplicate segment detection commit rolled back.")
 
-                if current.segment_type == SegmentType.CLUSTER:
-                    cluster_id = current.members[0].cluster_id
-                    my_params = (cluster_id, segment_id, current.run_id, current.avg_cluster_probability)
-                    utilities = SQLServerUtilities(sp='sp_insert_segment_cluster',
-                                                   sql_server_connection=self.sqlserver_connection,
-                                                   params_values=my_params,
-                                                   params='@ClusterID=?, @SegmentID=?, @RunID=?, '
-                                                          '@MeanClusterProbability=?',
-                                                   logger=self.logger)
-                    try:
-                        utilities.run_sql_params()
-                    except DatabaseIntegrityException as err:
-                        self.logger.error("Duplicate cluster segment commit rolled back.")
-            return segment_id
+        if current.segment_type == SegmentType.CLUSTER:
+            cluster_id = current.members[0].cluster_id
+            my_params = (cluster_id, segment_id, current.run_id, current.avg_cluster_probability)
+            utilities = SQLServerUtilities(sp='sp_insert_segment_cluster',
+                                           sql_server_connection=self.sqlserver_connection,
+                                           params_values=my_params,
+                                           params='@ClusterID=?, @SegmentID=?, @RunID=?, @MeanClusterProbability=?',
+                                           logger=self.logger)
+            try:
+                utilities.run_sql_params()
+            except DatabaseIntegrityException:
+                self.logger.error("Duplicate cluster segment commit rolled back.")
+
         return segment_id
 
     def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance_ms: int | None = None) -> list[
@@ -1076,7 +1077,7 @@ class BirdNetParser(BirdNetParserBase):
 
     def _cluster_clip_relpath(self, seg):
 
-        return Path(f"{seg.run_id}_{seg.cluster_id}_{seg.segment_id}.wav")
+        return Path(f"{seg.segment_id}.wav")
 
     def carve_segment_clips(self, segments, output_path, make_relpath):
         cache = WavCache()
