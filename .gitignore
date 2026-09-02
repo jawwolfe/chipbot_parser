@@ -19,7 +19,8 @@ data
 
 # Vagrant local state directory.
 .vagrant
-
+**/species/
+**/.species/
 .venv
 venv13
 config.py

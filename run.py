@@ -12,11 +12,12 @@ LOG_FILE_PATH = config.LOG_FILE_PATH
 LOG_MESSAGE = '%(asctime)s -%(process)d - %(levelname)s - %(message)s'
 LOG_TIME = '%d-%b-%y %H:%M:%S'
 EXTERNAL_DRIVE = config.EXTERNAL_DRIVE
-AUDIO_PATH = config.ROOT_PATH / Path("raw_audio_batches")
+AUDIO_PATH = config.ROOT_PATH / Path("audio_batches")
 CLIPS_PATH = config.ROOT_PATH / Path("segment_clips")
-DETECTION_LINKS = config.ROOT_PATH / Path("detection_links")
-CLUSTER_LINKS = config.ROOT_PATH / Path("cluster_links")
-SPECIES_LIST = config.ROOT_PATH / Path("species") / config.SPECIES_LIST
+DETECTION_LINKS = config.ROOT_PATH / Path("links_detections")
+CLUSTER_LINKS = config.ROOT_PATH / Path("links_clusters")
+SPECIES_LIST = (config.DRIVE_ROOT /  Path("C:/Users/Andrew Wolfe/PycharmProjectsP/chip_bot_parser/species")
+                / Path("species") / config.SPECIES_LIST)
 MIN_CONFIDENCE = config.MIN_CONFIDENCE
 OVERLAP = config.OVERLAP
 MIN_CLUSTER_SIZE = config.MIN_CLUSTER_SIZE

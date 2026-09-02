@@ -869,11 +869,12 @@ class BirdNetParser(BirdNetParserBase):
         # todo create a file with parameters and location/sites/dates
         #cluster_out.mkdir(parents=True, exist_ok=True)
 
-        written_detections = self.carve_segment_clips(
+        written_cluster_clips = self.carve_segment_clips(
             segments,
             cluster_out,
             make_relpath=self._cluster_clip_relpath,
         )
+        self.build_cluster_link_tree(written_cluster_clips, links_root=self.cluster_links)
 
 
     def parse_chunk_id(self, chunk_id: str) -> tuple[str, int]:
@@ -1110,7 +1111,7 @@ class BirdNetParser(BirdNetParserBase):
 
                 if out_path.exists():
                     self._ensure_clip_file_row(seg.segment_id, relpath)
-                    written.append((relpath.stem, str(out_path)))
+                    written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id))
                     continue
 
                 all_data = bytearray()
@@ -1142,7 +1143,92 @@ class BirdNetParser(BirdNetParserBase):
                     out_wf.writeframes(bytes(all_data))
 
                 self._insert_clip_file(seg.segment_id, relpath)
-                written.append((relpath.stem, str(out_path)))
+                written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id))
             return written
         finally:
             cache.close_all()
+
+    def _extract_link_fields(self, clip_record):
+        """
+        Pull run_id, cluster_id, and the source .wav path off a clip record
+        returned by carve_segment_clips(). Works whether clip_record is a dict
+        or an object with attributes -- adjust field names here if your
+        actual clip records use different keys/attrs.
+        """
+
+        def _get(obj, name):
+            if isinstance(obj, dict):
+                return obj.get(name)
+            return getattr(obj, name, None)
+
+        run_id = _get(clip_record, "run_id") or _get(clip_record, "RunID")
+        cluster_id = _get(clip_record, "cluster_id") or _get(clip_record, "ClusterID")
+        filepath = _get(clip_record, "filepath") or _get(clip_record, "path")
+
+        if filepath is None:
+            raise ValueError(f"Could not find a filepath on clip record: {clip_record!r}")
+        if run_id is None or cluster_id is None:
+            raise ValueError(f"Could not find run_id/cluster_id on clip record: {clip_record!r}")
+
+        return run_id, cluster_id, Path(filepath)
+
+    def build_cluster_link_tree(self, cluster_clip_records, links_root):
+        """
+        Build a directory tree of hard links to cluster clip files:
+
+            links_root/
+                run_<RunID>/
+                    cluster_<ClusterID>/
+                        <original clip filename>.wav  (hard link)
+
+        cluster_clip_records: iterable of clip records from carve_segment_clips()
+            for cluster segments (each must resolve to run_id, cluster_id, filepath
+            via _extract_link_fields).
+        links_root: base directory to build the link tree under.
+
+        Returns (linked_count, skipped) where skipped is a list of
+        (record, reason) for anything that couldn't be linked.
+        """
+        links_root = Path(links_root)
+        links_root.mkdir(parents=True, exist_ok=True)
+
+        linked_count = 0
+        skipped = []
+
+        for record in cluster_clip_records:
+            try:
+                run_id, cluster_id, src_path = (record[2], record[3], Path(self.clips_path) / Path(record[0] + '.wav'))
+            except ValueError as e:
+                skipped.append((record, str(e)))
+                self.logger.error(str(e))
+                continue
+
+            if not src_path.exists():
+                msg = f"Source clip missing, skipping link: {src_path}"
+                self.logger.error(msg)
+                skipped.append((record, msg))
+                continue
+
+            cluster_dir = links_root / f"run_{run_id}" / f"cluster_{cluster_id}"
+            cluster_dir.mkdir(parents=True, exist_ok=True)
+
+            link_path = cluster_dir / src_path.name
+
+            # avoid crashing on a rebuild/re-run where the link already exists
+            if link_path.exists():
+                link_path.unlink()
+
+            try:
+                os.link(src_path, link_path)
+                linked_count += 1
+            except OSError as e:
+                # Most common cause: links_root is on a different drive/volume
+                # than src_path -- Windows hard links can't cross volumes.
+                msg = f"Failed to hard link {src_path} -> {link_path}: {e}"
+                self.logger.error(msg)
+                skipped.append((record, msg))
+
+        self.logger.info(
+            f"Built cluster link tree at {links_root}: {linked_count} linked, {len(skipped)} skipped."
+        )
+        return linked_count, skipped
