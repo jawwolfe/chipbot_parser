@@ -12,10 +12,11 @@ LOG_FILE_PATH = config.LOG_FILE_PATH
 LOG_MESSAGE = '%(asctime)s -%(process)d - %(levelname)s - %(message)s'
 LOG_TIME = '%d-%b-%y %H:%M:%S'
 EXTERNAL_DRIVE = config.EXTERNAL_DRIVE
-AUDIO_PATH = config.ROOT_DATA_PATH / Path("Input")
-OUTPUT_PATH_CLUSTERS = config.ROOT_DATA_PATH / Path("output_clusters")
-OUTPUT_PATH_DETECTIONS = config.ROOT_DATA_PATH / Path("output_detections")
-SPECIES_LIST = config.ROOT_DATA_PATH / Path("species") / config.SPECIES_LIST
+AUDIO_PATH = config.ROOT_PATH / Path("raw_audio_batches")
+CLIPS_PATH = config.ROOT_PATH / Path("segment_clips")
+DETECTION_LINKS = config.ROOT_PATH / Path("detection_links")
+CLUSTER_LINKS = config.ROOT_PATH / Path("cluster_links")
+SPECIES_LIST = config.ROOT_PATH / Path("species") / config.SPECIES_LIST
 MIN_CONFIDENCE = config.MIN_CONFIDENCE
 OVERLAP = config.OVERLAP
 MIN_CLUSTER_SIZE = config.MIN_CLUSTER_SIZE
@@ -83,9 +84,9 @@ def initialize_sqlserver():
 m = initialize_sqlserver()
 
 
-parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, output_path_clusters=OUTPUT_PATH_CLUSTERS,
-                      min_confidence=MIN_CONFIDENCE, species_list=SPECIES_LIST,
-                      external_drive=EXTERNAL_DRIVE, output_path_detections=OUTPUT_PATH_DETECTIONS,
+parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, cluster_links=CLUSTER_LINKS,
+                      min_confidence=MIN_CONFIDENCE, species_list=SPECIES_LIST, clips_path=CLIPS_PATH,
+                      external_drive=EXTERNAL_DRIVE, detection_links=DETECTION_LINKS,
                       gap_tolerance_ms=GAP_TOLERANCE_MS, umap=initialize_umap(), umap_viz=initialize_umap_viz(),
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
                       analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP,

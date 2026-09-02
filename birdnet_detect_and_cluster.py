@@ -122,16 +122,17 @@ class WavCache:
             wf.close()
 
 class BirdNetParser(BirdNetParserBase):
-    def __init__(self, logger, external_drive, audio_path, output_path_clusters, output_path_detections, min_confidence,
+    def __init__(self, logger, external_drive, audio_path, cluster_links, detection_links,clips_path, min_confidence,
                  overlap, species_list, gap_tolerance_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text,
                  analyze_file_group, sqlserver_connection, pinecone_key, birdnet_model_version, min_cluster_probability):
         self.external_drive = external_drive
         self.audio_path = audio_path
-        self.output_path_clusters = output_path_clusters
-        self.output_path_detections = output_path_detections
+        self.clips_path = clips_path
+        self.cluster_links = cluster_links
+        self.detection_links = detection_links
+        self.species_list_path = species_list
         self.min_confidence = min_confidence
         self.overlap = overlap
-        self.species_list_path = species_list
         self.gap_tolerance_ms = gap_tolerance_ms
         self.min_cluster_probability = min_cluster_probability
         self.umap = umap
@@ -718,9 +719,10 @@ class BirdNetParser(BirdNetParserBase):
             self.extract_and_store(source_audio_dir=archive_dir)
             detections = self.fetch_all_detections(batch_id)
             segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
-            clips_root = Path(self.output_path_detections)  # wherever your base clips folder lives
-            detection_out = clips_root / Path(segments_detections[0].directory)
-            detection_out.mkdir(parents=True, exist_ok=True)
+            clips_root = Path(self.clips_path)  # wherever your base clips folder lives
+            #detection_out = clips_root / Path(segments_detections[0].directory)
+            detection_out = clips_root
+            #detection_out.mkdir(parents=True, exist_ok=True)
             written_detections = self.carve_segment_clips(
                 segments_detections,
                 detection_out,
@@ -729,11 +731,12 @@ class BirdNetParser(BirdNetParserBase):
 
     def process(self):
         #self.extract_and_store(source_audio_dir=Path('C:\\temp\\CHIPBOT_DATA_ROOT\\input\\United-States_Indiana_Indianapolis-House-Backyard_2026-07-18-053107_2026-07-18-082620'))
-        detections = self.fetch_all_detections(7)
+        detections = self.fetch_all_detections(8)
         segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
-        clips_root = Path(self.output_path_detections)  # wherever your base clips folder lives
-        detection_out = clips_root / Path(segments_detections[0].directory)
-        detection_out.mkdir(parents=True, exist_ok=True)
+        clips_root = Path(self.clips_path)  # wherever your base clips folder lives
+        #detection_out = clips_root / Path(segments_detections[0].directory)
+        detection_out = clips_root
+        #detection_out.mkdir(parents=True, exist_ok=True)
         written_detections = self.carve_segment_clips(
             segments_detections,
             detection_out,
@@ -861,10 +864,10 @@ class BirdNetParser(BirdNetParserBase):
         utilities.run_sql_bulk_params()
         segments = self.run_cluster_segmentation(run_id)
 
-        clips_root = Path(self.output_path_clusters)  # wherever your base clips folder lives
+        clips_root = Path(self.clips_path)
         cluster_out = clips_root
         # todo create a file with parameters and location/sites/dates
-        cluster_out.mkdir(parents=True, exist_ok=True)
+        #cluster_out.mkdir(parents=True, exist_ok=True)
 
         written_detections = self.carve_segment_clips(
             segments,
@@ -1072,18 +1075,44 @@ class BirdNetParser(BirdNetParserBase):
 
     def _detection_clip_relpath(self, seg, sanitize_species):
 
-        species_slug = sanitize_species(seg.species)
-        return Path(f"{species_slug}_{seg.segment_id}.wav")
+        #species_slug = sanitize_species(seg.species)
+        #return Path(f"{species_slug}_{seg.segment_id}.wav")
+        return Path(f"segment_{seg.segment_id}.wav")
 
     def _cluster_clip_relpath(self, seg):
 
-        return Path(f"{seg.segment_id}.wav")
+        return Path(f"segment_{seg.segment_id}.wav")
+
+
+    def _insert_clip_file(self, segment_id, relpath):
+        utilities = SQLServerUtilities(sp='sp_insert_segment_clip',
+                                       sql_server_connection=self.sqlserver_connection,
+                                       params_values=(segment_id, str(relpath)),
+                                       params='@SegmentID=?, @FilePath=?', logger=self.logger)
+        try:
+            utilities.run_sql_params()
+        except DatabaseIntegrityException:
+            self.logger.error(f"ClipFiles row already exists for segment {segment_id}.")
+
+    def _ensure_clip_file_row(self, segment_id, relpath):
+        # covers a file that exists on disk but never got its DB row
+        # (e.g. crash between write and commit on a prior run)
+        self._insert_clip_file(segment_id, relpath)
+
 
     def carve_segment_clips(self, segments, output_path, make_relpath):
         cache = WavCache()
         written = []
         try:
             for seg in segments:
+                relpath = make_relpath(seg)
+                out_path = Path(output_path) / relpath
+
+                if out_path.exists():
+                    self._ensure_clip_file_row(seg.segment_id, relpath)
+                    written.append((relpath.stem, str(out_path)))
+                    continue
+
                 all_data = bytearray()
                 wave_params = None
 
@@ -1104,8 +1133,6 @@ class BirdNetParser(BirdNetParserBase):
                     print(f"Skipping empty segment: {seg.first_chunk_id}-{seg.last_chunk_id}")
                     continue
 
-                relpath = make_relpath(seg)
-                out_path = Path(output_path) / relpath
                 out_path.parent.mkdir(parents=True, exist_ok=True)
 
                 with wave.open(str(out_path), "wb") as out_wf:
@@ -1114,6 +1141,7 @@ class BirdNetParser(BirdNetParserBase):
                     out_wf.setframerate(wave_params.framerate)
                     out_wf.writeframes(bytes(all_data))
 
+                self._insert_clip_file(seg.segment_id, relpath)
                 written.append((relpath.stem, str(out_path)))
             return written
         finally:
