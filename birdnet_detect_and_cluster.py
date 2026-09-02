@@ -719,31 +719,42 @@ class BirdNetParser(BirdNetParserBase):
             self.extract_and_store(source_audio_dir=archive_dir)
             detections = self.fetch_all_detections(batch_id)
             segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
-            clips_root = Path(self.clips_path)  # wherever your base clips folder lives
-            #detection_out = clips_root / Path(segments_detections[0].directory)
+            clips_root = Path(self.clips_path)
             detection_out = clips_root
-            #detection_out.mkdir(parents=True, exist_ok=True)
             written_detections = self.carve_segment_clips(
                 segments_detections,
                 detection_out,
                 make_relpath=partial(self._detection_clip_relpath, sanitize_species=self.sanitize_for_filename),
             )
             self.build_detection_link_tree(written_detections, links_root=self.detection_links)
+            run_path = Path(self.detection_links) / f"run_{archive_stem}" / Path("summary.txt")
+            with open(run_path, "a") as summary:
+                summary.write(f'Detections Summary: \n')
+
+            summary.close()
 
     def process(self):
         #self.extract_and_store(source_audio_dir=Path('C:\\temp\\CHIPBOT_DATA_ROOT\\input\\United-States_Indiana_Indianapolis-House-Backyard_2026-07-18-053107_2026-07-18-082620'))
         detections = self.fetch_all_detections(9)
         segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
-        clips_root = Path(self.clips_path)  # wherever your base clips folder lives
-        #detection_out = clips_root / Path(segments_detections[0].directory)
+        clips_root = Path(self.clips_path)
         detection_out = clips_root
-        #detection_out.mkdir(parents=True, exist_ok=True)
         written_detections = self.carve_segment_clips(
             segments_detections,
             detection_out,
             make_relpath=partial(self._detection_clip_relpath, sanitize_species=self.sanitize_for_filename),
         )
         self.build_detection_link_tree(written_detections, links_root=self.detection_links)
+        run_path = Path(self.detection_links) / Path(f"run_United-States_Indiana_Indianapolis-House-Backyard_2026-07-18-053107_2026-07-18-082620") / Path("summary.txt")
+        with open(run_path, "a") as summary:
+            summary.write(f'Detections Summary: \n')
+            summary.write(str(statistics['Total Duration']) + ' minutes of audio analyzed.\n')
+            summary.write(str(statistics['Total Chunk Count']) + ' 3 second chunks.\n')
+            summary.write(str(statistics['Total Detection Count']) + ' clusters identified.\n')
+            summary.write(str(statistics['Total Segment Count']) + ' segments collected.\n\n')
+            summary.write('Segmentation Parameters used:\n')
+            summary.write(str(self.gap_tolerance_ms / 1000) + ' gap tolerance (seconds).\n\n')
+        summary.close()
 
     def clusterer(self, batch=None, only_unidentified=True, start_date=None, end_date=None,
                   site_list = None, level_1 = None, level_2 = None, level_3 = None):
