@@ -100,7 +100,7 @@ clean = CleanSegments(logger=initialize_logger(), sqlserver_connection=initializ
 #ids = clean.phase1_delete_files()
 #clean.phase2_delete_db_rows()
 
-parse.clusterer(site_list=[55])
+#parse.clusterer(site_list=[55])
 #parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
 #parse.run_cluster_segmentation(8)
-#parse.process()
+parse.process()

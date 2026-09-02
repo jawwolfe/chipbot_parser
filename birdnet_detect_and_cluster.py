@@ -728,10 +728,11 @@ class BirdNetParser(BirdNetParserBase):
                 detection_out,
                 make_relpath=partial(self._detection_clip_relpath, sanitize_species=self.sanitize_for_filename),
             )
+            self.build_detection_link_tree(written_detections, links_root=self.detection_links)
 
     def process(self):
         #self.extract_and_store(source_audio_dir=Path('C:\\temp\\CHIPBOT_DATA_ROOT\\input\\United-States_Indiana_Indianapolis-House-Backyard_2026-07-18-053107_2026-07-18-082620'))
-        detections = self.fetch_all_detections(8)
+        detections = self.fetch_all_detections(9)
         segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
         clips_root = Path(self.clips_path)  # wherever your base clips folder lives
         #detection_out = clips_root / Path(segments_detections[0].directory)
@@ -742,6 +743,7 @@ class BirdNetParser(BirdNetParserBase):
             detection_out,
             make_relpath=partial(self._detection_clip_relpath, sanitize_species=self.sanitize_for_filename),
         )
+        self.build_detection_link_tree(written_detections, links_root=self.detection_links)
 
     def clusterer(self, batch=None, only_unidentified=True, start_date=None, end_date=None,
                   site_list = None, level_1 = None, level_2 = None, level_3 = None):
@@ -881,18 +883,27 @@ class BirdNetParser(BirdNetParserBase):
         )
         self.build_cluster_link_tree(written_cluster_clips, links_root=self.cluster_links)
         utilities = SQLServerUtilities(sp='sp_get_run_metrics',
-                                       sql_server_connection=self.sqlserver_connection, params_values=run_id,
+                                          sql_server_connection=self.sqlserver_connection, params_values=run_id,
                                        params='@RunID=?', logger=self.logger)
         data_stats = utilities.run_sql_return_params()
         statistics = dict(data_stats)
         chunks = statistics['Total Chunk Count']
         run_path = Path(self.cluster_links) / f"run_{run_id}" / Path("summary.txt")
         with open(run_path, "a") as summary:
-            summary.write('Clusters Summary: \n')
+            summary.write('Clusters Query: \n')
+            summary.write('Only Unidentified: ' + str(only_unidentified) + '\n')
+            summary.write(f'Batch: {batch}\n')
+            summary.write(f'Level1: {level_1}\n')
+            summary.write(f'Level2: {level_2}\n')
+            summary.write(f'Level3: {level_3}\n')
+            summary.write(f'Site List: {site_list}\n')
+            summary.write(f'Start Date: {start_date}\n')
+            summary.write(f'End Date: {end_date}\n\n')
+            summary.write(f'Clusters Summary: \n')
             summary.write(str(statistics['Total Duration']) + ' minutes of audio analyzed.\n')
-            summary.write(str(statistics['Total Chunk Count']) + ' 3 second chunks.\n')
             summary.write(str(statistics['Noise Duration']) + ' minutes of noise in cluster -1.\n')
             summary.write(str(statistics['Clustered Duration']) + ' minutes of audio clustered.\n')
+            summary.write(str(statistics['Total Chunk Count']) + ' 3 second chunks.\n')
             summary.write(str(statistics['Total Cluster Count']) + ' clusters identified.\n')
             summary.write(str(statistics['Total Segment Count']) + ' segments collected.\n\n')
             summary.write('Segmentation Parameters used:\n')
@@ -1138,7 +1149,8 @@ class BirdNetParser(BirdNetParserBase):
 
                 if out_path.exists():
                     self._ensure_clip_file_row(seg.segment_id, relpath)
-                    written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id))
+                    written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id, seg.directory,
+                                    seg.species.replace(' ', '_')))
                     continue
 
                 all_data = bytearray()
@@ -1200,22 +1212,7 @@ class BirdNetParser(BirdNetParserBase):
         return run_id, cluster_id, Path(filepath)
 
     def build_cluster_link_tree(self, cluster_clip_records, links_root):
-        """
-        Build a directory tree of hard links to cluster clip files:
 
-            links_root/
-                run_<RunID>/
-                    cluster_<ClusterID>/
-                        <original clip filename>.wav  (hard link)
-
-        cluster_clip_records: iterable of clip records from carve_segment_clips()
-            for cluster segments (each must resolve to run_id, cluster_id, filepath
-            via _extract_link_fields).
-        links_root: base directory to build the link tree under.
-
-        Returns (linked_count, skipped) where skipped is a list of
-        (record, reason) for anything that couldn't be linked.
-        """
         links_root = Path(links_root)
         links_root.mkdir(parents=True, exist_ok=True)
 
@@ -1257,5 +1254,52 @@ class BirdNetParser(BirdNetParserBase):
 
         self.logger.info(
             f"Built cluster link tree at {links_root}: {linked_count} linked, {len(skipped)} skipped."
+        )
+        return linked_count, skipped
+
+    def build_detection_link_tree(self, detection_clip_records, links_root):
+
+        links_root = Path(links_root)
+        links_root.mkdir(parents=True, exist_ok=True)
+
+        linked_count = 0
+        skipped = []
+
+        for record in detection_clip_records:
+            try:
+                batch_dir, segment_id, src_path, species = (record[4], record[0],
+                                                   Path(self.clips_path) / Path(record[0] + '.wav'), record[5])
+            except ValueError as e:
+                skipped.append((record, str(e)))
+                self.logger.error(str(e))
+                continue
+
+            if not src_path.exists():
+                msg = f"Source clip missing, skipping link: {src_path}"
+                self.logger.error(msg)
+                skipped.append((record, msg))
+                continue
+
+            batch_link_dir = links_root / str(batch_dir)
+            batch_link_dir.mkdir(parents=True, exist_ok=True)
+
+            link_path = batch_link_dir / f"{species.replace(' ', '-')}_{segment_id.split('_')[1]}.wav"
+
+            # avoid crashing on a rebuild/re-run where the link already exists
+            if link_path.exists():
+                link_path.unlink()
+
+            try:
+                os.link(src_path, link_path)
+                linked_count += 1
+            except OSError as e:
+                # Most common cause: links_root is on a different drive/volume
+                # than src_path -- Windows hard links can't cross volumes.
+                msg = f"Failed to hard link {src_path} -> {link_path}: {e}"
+                self.logger.error(msg)
+                skipped.append((record, msg))
+
+        self.logger.info(
+            f"Built detection link tree at {links_root}: {linked_count} linked, {len(skipped)} skipped."
         )
         return linked_count, skipped
