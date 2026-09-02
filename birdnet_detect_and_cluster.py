@@ -751,6 +751,11 @@ class BirdNetParser(BirdNetParserBase):
         "umap": self.umap,
         "umap_viz": self.umap_viz
         }
+        clean_ml_parameters = {
+            "hdbscan": vars(self.hdbscan_clusters),
+            "umap": vars(self.umap),
+            "umap_viz": vars(self.umap_viz),
+        }
 
         params_json_payload = json.dumps(jconfig_payload, default=vars)
 
@@ -875,6 +880,28 @@ class BirdNetParser(BirdNetParserBase):
             make_relpath=self._cluster_clip_relpath,
         )
         self.build_cluster_link_tree(written_cluster_clips, links_root=self.cluster_links)
+        utilities = SQLServerUtilities(sp='sp_get_run_metrics',
+                                       sql_server_connection=self.sqlserver_connection, params_values=run_id,
+                                       params='@RunID=?', logger=self.logger)
+        data_stats = utilities.run_sql_return_params()
+        statistics = dict(data_stats)
+        chunks = statistics['Total Chunk Count']
+        run_path = Path(self.cluster_links) / f"run_{run_id}" / Path("summary.txt")
+        with open(run_path, "a") as summary:
+            summary.write('Clusters Summary: \n')
+            summary.write(str(statistics['Total Duration']) + ' minutes of audio analyzed.\n')
+            summary.write(str(statistics['Total Chunk Count']) + ' 3 second chunks.\n')
+            summary.write(str(statistics['Noise Duration']) + ' minutes of noise in cluster -1.\n')
+            summary.write(str(statistics['Clustered Duration']) + ' minutes of audio clustered.\n')
+            summary.write(str(statistics['Total Cluster Count']) + ' clusters identified.\n')
+            summary.write(str(statistics['Total Segment Count']) + ' segments collected.\n\n')
+            summary.write('Segmentation Parameters used:\n')
+            summary.write(str(self.min_cluster_probability) + ' min cluster probability.\n')
+            summary.write(str(self.gap_tolerance_ms / 1000) + ' gap tolerance (seconds).\n\n')
+            summary.write('HDBSCAN and NMAP Parameters used:\n')
+            json.dump(clean_ml_parameters, summary, indent=4)
+        summary.close()
+
 
 
     def parse_chunk_id(self, chunk_id: str) -> tuple[str, int]:

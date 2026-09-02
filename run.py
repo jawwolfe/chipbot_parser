@@ -1,4 +1,5 @@
 from birdnet_detect_and_cluster import BirdNetParser
+from clean_segments import CleanSegments
 from configs import config
 from pathlib import Path
 
@@ -94,6 +95,10 @@ parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, cluster
                       sqlserver_connection=initialize_sqlserver(), pinecone_key=PINECONE_KEY,
                       birdnet_model_version=BIRDNET_MODEL_VERSION, min_cluster_probability=MIN_CLUSTER_PROBABILITY)
 
+
+clean = CleanSegments(logger=initialize_logger(), sqlserver_connection=initialize_sqlserver(),clips_path=CLIPS_PATH)
+#ids = clean.phase1_delete_files()
+#clean.phase2_delete_db_rows()
 
 parse.clusterer(site_list=[55])
 #parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
