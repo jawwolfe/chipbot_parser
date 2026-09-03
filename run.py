@@ -17,8 +17,8 @@ AUDIO_PATH = config.ROOT_PATH / Path("audio_batches")
 CLIPS_PATH = config.ROOT_PATH / Path("segment_clips")
 DETECTION_LINKS = config.ROOT_PATH / Path("links_detections")
 CLUSTER_LINKS = config.ROOT_PATH / Path("links_clusters")
-SPECIES_LIST = (config.DRIVE_ROOT /  Path("C:/Users/Andrew Wolfe/PycharmProjectsP/chip_bot_parser/species")
-                / Path("species") / config.SPECIES_LIST)
+SPECIES_LIST = (config.DRIVE_ROOT /  Path("Users/Andrew Wolfe/PycharmProjectsP/chip_bot_parser/species")
+                / config.SPECIES_LIST)
 MIN_CONFIDENCE = config.MIN_CONFIDENCE
 OVERLAP = config.OVERLAP
 MIN_CLUSTER_SIZE = config.MIN_CLUSTER_SIZE
@@ -95,12 +95,11 @@ parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, cluster
                       sqlserver_connection=initialize_sqlserver(), pinecone_key=PINECONE_KEY,
                       birdnet_model_version=BIRDNET_MODEL_VERSION, min_cluster_probability=MIN_CLUSTER_PROBABILITY)
 
-
 clean = CleanSegments(logger=initialize_logger(), sqlserver_connection=initialize_sqlserver(),clips_path=CLIPS_PATH)
 #ids = clean.phase1_delete_files()
-#clean.phase2_delete_db_rows()
+#clean.phase2_delete_db_rows(ids)
 
-#parse.clusterer(site_list=[55])
+parse.clusterer(site_list=[17])
 #parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
 #parse.run_cluster_segmentation(8)
-parse.process()
+#parse.process()

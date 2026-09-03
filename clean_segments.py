@@ -9,7 +9,7 @@ WHERE SegmentID NOT IN (
     SELECT SegmentID FROM SegmentCluster
 );
 """
-DRY_RUN = True
+DRY_RUN = False
 
 class CleanSegmentsBase:
     def __init__(self, logger):

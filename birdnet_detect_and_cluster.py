@@ -26,8 +26,8 @@ from enum import Enum
 from functools import partial
 
 IGNORED_LABEL = "unidentified/ambient"
-DEFAULT_LAT = '39.8755985'
-DEFAULT_LONG = '-86.2844157'
+DEFAULT_LAT = '10.6608806'
+DEFAULT_LONG = '124.3595418'
 CLUSTER_ALGORITHM = 'HDBSCAN'
 
 @dataclass
@@ -727,31 +727,50 @@ class BirdNetParser(BirdNetParserBase):
                 make_relpath=partial(self._detection_clip_relpath, sanitize_species=self.sanitize_for_filename),
             )
             self.build_detection_link_tree(written_detections, links_root=self.detection_links)
-            run_path = Path(self.detection_links) / f"run_{archive_stem}" / Path("summary.txt")
+            utilities = SQLServerUtilities(sp='sp_get_batch_metrics',
+                                           sql_server_connection=self.sqlserver_connection, params_values=batch_id,
+                                           params='@BatchID=?', logger=self.logger)
+            data_stats = utilities.run_sql_return_params()[0]
+            run_path = Path(self.detection_links) / Path(archive_stem) / Path(f"summary_batch_{batch_id}.txt")
             with open(run_path, "a") as summary:
                 summary.write(f'Detections Summary: \n')
-
+                summary.write(str(data_stats[0]) + ' 3 second chunks with detections.\n')
+                summary.write(str(data_stats[1]) + ' species identified.\n')
+                summary.write(str(data_stats[2]) + ' species segments collected.\n\n')
+                summary.write('Detection Parameters used:\n')
+                summary.write(str(self.min_confidence) + ' minimum confidence required.\n')
+                summary.write(str(self.overlap) + ' overlap (seconds).\n\n')
+                summary.write('Segmentation Parameters used:\n')
+                summary.write(str(self.gap_tolerance_ms / 1000) + ' gap tolerance (seconds).\n\n')
             summary.close()
 
     def process(self):
         #self.extract_and_store(source_audio_dir=Path('C:\\temp\\CHIPBOT_DATA_ROOT\\input\\United-States_Indiana_Indianapolis-House-Backyard_2026-07-18-053107_2026-07-18-082620'))
-        detections = self.fetch_all_detections(9)
+        detections = self.fetch_all_detections(12)
         segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
         clips_root = Path(self.clips_path)
         detection_out = clips_root
-        written_detections = self.carve_segment_clips(
+        written_detections_1 = self.carve_segment_clips(
             segments_detections,
             detection_out,
             make_relpath=partial(self._detection_clip_relpath, sanitize_species=self.sanitize_for_filename),
         )
-        self.build_detection_link_tree(written_detections, links_root=self.detection_links)
-        run_path = Path(self.detection_links) / Path(f"run_United-States_Indiana_Indianapolis-House-Backyard_2026-07-18-053107_2026-07-18-082620") / Path("summary.txt")
+        self.build_detection_link_tree(written_detections_1, links_root=self.detection_links)
+        utilities = SQLServerUtilities(sp='sp_get_batch_metrics',
+                                          sql_server_connection=self.sqlserver_connection, params_values=14,
+                                       params='@BatchID=?', logger=self.logger)
+        data_stats = utilities.run_sql_return_params()[0]
+        run_path = (Path(self.detection_links)
+                    / Path(f"Philippines_Cebu_Pacijan-Lake-Danao-Marsh-East_2026-09-03-111353_2026-09-03-125900")
+                    / Path(f"summary_batch_14.txt"))
         with open(run_path, "a") as summary:
             summary.write(f'Detections Summary: \n')
-            summary.write(str(statistics['Total Duration']) + ' minutes of audio analyzed.\n')
-            summary.write(str(statistics['Total Chunk Count']) + ' 3 second chunks.\n')
-            summary.write(str(statistics['Total Detection Count']) + ' clusters identified.\n')
-            summary.write(str(statistics['Total Segment Count']) + ' segments collected.\n\n')
+            summary.write(str(data_stats[0]) + ' 3 second chunks with detections.\n')
+            summary.write(str(data_stats[1]) + ' species identified.\n')
+            summary.write(str(data_stats[2]) + ' species segments collected.\n\n')
+            summary.write('Detection Parameters used:\n')
+            summary.write(str(self.min_confidence) + ' minimum confidence required.\n')
+            summary.write(str(self.overlap) + ' overlap (seconds).\n\n')
             summary.write('Segmentation Parameters used:\n')
             summary.write(str(self.gap_tolerance_ms / 1000) + ' gap tolerance (seconds).\n\n')
         summary.close()
@@ -899,7 +918,7 @@ class BirdNetParser(BirdNetParserBase):
         data_stats = utilities.run_sql_return_params()
         statistics = dict(data_stats)
         chunks = statistics['Total Chunk Count']
-        run_path = Path(self.cluster_links) / f"run_{run_id}" / Path("summary.txt")
+        run_path = Path(self.cluster_links) / f"run_{run_id}" / Path(f"summary_run{run_id}.txt")
         with open(run_path, "a") as summary:
             summary.write('Clusters Query: \n')
             summary.write('Only Unidentified: ' + str(only_unidentified) + '\n')
@@ -1161,7 +1180,7 @@ class BirdNetParser(BirdNetParserBase):
                 if out_path.exists():
                     self._ensure_clip_file_row(seg.segment_id, relpath)
                     written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id, seg.directory,
-                                    seg.species.replace(' ', '_')))
+                                   (seg.species or '').replace(' ', '_')))
                     continue
 
                 all_data = bytearray()
@@ -1193,7 +1212,8 @@ class BirdNetParser(BirdNetParserBase):
                     out_wf.writeframes(bytes(all_data))
 
                 self._insert_clip_file(seg.segment_id, relpath)
-                written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id))
+                written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id, seg.directory,
+                                (seg.species or '').replace(' ', '_')))
             return written
         finally:
             cache.close_all()
@@ -1243,8 +1263,13 @@ class BirdNetParser(BirdNetParserBase):
                 self.logger.error(msg)
                 skipped.append((record, msg))
                 continue
-
-            cluster_dir = links_root / f"run_{run_id}" / f"cluster_{cluster_id}"
+            # add suffix to cluster ID with total seconds length and num segments
+            utilities = SQLServerUtilities(sp='sp_get_cluster_counts',
+                                           sql_server_connection=self.sqlserver_connection,
+                                           params_values=(run_id, cluster_id), params='@RunID=?, @ClusterID=?',
+                                           logger=self.logger)
+            data_stats = utilities.run_sql_return_params()[0]
+            cluster_dir = links_root / f"run_{run_id}" / f"cluster_{cluster_id}_{data_stats[0]}min_{data_stats[1]}seg"
             cluster_dir.mkdir(parents=True, exist_ok=True)
 
             link_path = cluster_dir / src_path.name
