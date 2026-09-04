@@ -46,6 +46,7 @@ class ClusterChunkRow:
     device: str
     start_sample: int
     end_sample: int
+    peak_dbfs: float
 
 @dataclass
 class DetectionRow:
@@ -64,6 +65,8 @@ class DetectionRow:
     end_datetime: datetime
     directory: str
     device: str
+    confidence: float
+    peak_dbfs: float | None = None
 
 class SegmentType(Enum):
     DETECTION = "detection"
@@ -90,6 +93,8 @@ class Segment:
     cluster_id: int | None = None
     avg_cluster_probability: float | None = None
     segment_id: int | None = None
+    avg_peak_dbfs: float | None = None
+    avg_confidence: float | None = None
 
 class BirdNetParserBase:
     def __init__(self, logger):
@@ -124,7 +129,8 @@ class WavCache:
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, cluster_links, detection_links,clips_path, min_confidence,
                  overlap, species_list, gap_tolerance_ms, hdbscan_clusters, umap, umap_viz, analysis_run_text,
-                 analyze_file_group, sqlserver_connection, pinecone_key, birdnet_model_version, min_cluster_probability):
+                 analyze_file_group, sqlserver_connection, pinecone_key, birdnet_model_version, min_cluster_probability,
+                 species_ignore):
         self.external_drive = external_drive
         self.audio_path = audio_path
         self.clips_path = clips_path
@@ -143,6 +149,7 @@ class BirdNetParser(BirdNetParserBase):
         self.sqlserver_connection = sqlserver_connection
         self.pinecone_key = pinecone_key
         self.birdnet_model_version = birdnet_model_version
+        self.species_ignore = species_ignore
         BirdNetParserBase.__init__(self, logger=logger)
 
     def parse_log(self, path):
@@ -178,6 +185,12 @@ class BirdNetParser(BirdNetParserBase):
         # Return as a list containing the single log entry dictionary
         return [{"logfilename": logfilename, "data": entries}]
 
+    def peak_dbfs(self, samples: np.ndarray) -> float:
+        peak_amplitude = np.max(np.abs(samples.astype(np.float64)))
+        if peak_amplitude == 0:
+            return -np.inf
+        return 20 * np.log10(peak_amplitude / 32768.0)  # ref = full int16 range
+
     def get_regions(self, gps_coordinates):
         lat, lon = gps_coordinates
 
@@ -188,7 +201,6 @@ class BirdNetParser(BirdNetParserBase):
         try:
             response = requests.get(url, headers=headers).json()
             address = response.get("address", {})
-
             # Handle village and hamlet combination logic
             village = address.get("village")
             hamlet = address.get("hamlet")
@@ -215,7 +227,6 @@ class BirdNetParser(BirdNetParserBase):
                     or address.get("city_district")
                     or "N/A"
             )
-
             # 3. Province / State / County
             province = (
                     address.get("province")
@@ -224,7 +235,6 @@ class BirdNetParser(BirdNetParserBase):
                     or address.get("county")
                     or "N/A"
             )
-
             # 4. Broader Region / Island Group
             region = (
                     address.get("ISO3166-2-lvl4")
@@ -232,7 +242,6 @@ class BirdNetParser(BirdNetParserBase):
                     or address.get("state")
                     or "N/A"
             )
-
             # 5. Country
             country = address.get("country", "N/A")
 
@@ -243,7 +252,6 @@ class BirdNetParser(BirdNetParserBase):
                 "region": region,
                 "country": country
             }
-
         except Exception as e:
             print(f"An error occurred: {e}")
             return None
@@ -542,6 +550,8 @@ class BirdNetParser(BirdNetParserBase):
             except Exception as e:
                 print(f"Error on {file_path.name}: {e}")
                 continue
+            # NEW: load raw samples once per file
+            audio_samples, sample_rate = sf.read(file_path, dtype='int16')
             i = 0
             insert_data_chunk = []
             insert_data_embed = []
@@ -550,18 +560,27 @@ class BirdNetParser(BirdNetParserBase):
                 chunk_id_m = file_path.stem + "_" + str(int(item_m['start_time'] / 3))
                 vector_str = json.dumps(item_e.tolist())
                 values = self.get_abs_chunks_datetime(item_m['file'][:-4], item_m['start_time'], item_m['end_time'])
+
+                # NEW
+                start_sample = int(item_m['start_time'] * sample_rate)
+                end_sample = int(item_m['end_time'] * sample_rate)
+                chunk_samples = audio_samples[start_sample:end_sample]
+                peak_db = self.peak_dbfs(chunk_samples)
+
                 insert_data_chunk.append((chunk_id_m, item_m['file'][:-4], item_m['start_time'], item_m['end_time'], i,
-                                          values[0], values[1]))
+                                          values[0], values[1], peak_db))
                 insert_data_embed.append((chunk_id_m, float(self.birdnet_model_version), vector_str))
                 i += 1
             for item_d in detections:
                 chunk_id = file_path.stem + "_" + str(int(item_d['start_time'] / 3))
+                if item_d['scientific_name'] in self.species_ignore:
+                    continue
                 insert_data_detect.append((chunk_id, float(self.birdnet_model_version),
                                            item_d['common_name'] + ' (' + item_d['scientific_name'] + ')',
                                            item_d['confidence']))
                 
             insert_sql = ("INSERT INTO Chunks (ChunkID, FileName, StartSample, EndSample, ChunkIndex, AbsStartMS, "
-                          "AbsEndMS) VALUES (?, ?, ?, ?, ?, ?, ?)")
+                          "AbsEndMS, PeakDBFS) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
                                            params_values=insert_data_chunk, logger=self.logger)
             try:
@@ -717,52 +736,25 @@ class BirdNetParser(BirdNetParserBase):
             self.logger.info("Begin Birdnet Embedding and Database insert.")
             # now insert all embeddings for this batch into SQL Server
             self.extract_and_store(source_audio_dir=archive_dir)
-            detections = self.fetch_all_detections(batch_id)
-            segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
-            clips_root = Path(self.clips_path)
-            detection_out = clips_root
-            written_detections = self.carve_segment_clips(
-                segments_detections,
-                detection_out,
-                make_relpath=partial(self._detection_clip_relpath, sanitize_species=self.sanitize_for_filename),
-            )
-            self.build_detection_link_tree(written_detections, links_root=self.detection_links)
-            utilities = SQLServerUtilities(sp='sp_get_batch_metrics',
-                                           sql_server_connection=self.sqlserver_connection, params_values=batch_id,
-                                           params='@BatchID=?', logger=self.logger)
-            data_stats = utilities.run_sql_return_params()[0]
-            run_path = Path(self.detection_links) / Path(archive_stem) / Path(f"summary_batch_{batch_id}.txt")
-            with open(run_path, "a") as summary:
-                summary.write(f'Detections Summary: \n')
-                summary.write(str(data_stats[0]) + ' 3 second chunks with detections.\n')
-                summary.write(str(data_stats[1]) + ' species identified.\n')
-                summary.write(str(data_stats[2]) + ' species segments collected.\n\n')
-                summary.write('Detection Parameters used:\n')
-                summary.write(str(self.min_confidence) + ' minimum confidence required.\n')
-                summary.write(str(self.overlap) + ' overlap (seconds).\n\n')
-                summary.write('Segmentation Parameters used:\n')
-                summary.write(str(self.gap_tolerance_ms / 1000) + ' gap tolerance (seconds).\n\n')
-            summary.close()
+            self.detection_segmentation(batch_id=batch_id, directory=archive_stem)
 
-    def process(self):
-        #self.extract_and_store(source_audio_dir=Path('C:\\temp\\CHIPBOT_DATA_ROOT\\input\\United-States_Indiana_Indianapolis-House-Backyard_2026-07-18-053107_2026-07-18-082620'))
-        detections = self.fetch_all_detections(12)
+
+    def detection_segmentation(self, batch_id, directory):
+        detections = self.fetch_all_detections(batch_id)
         segments_detections = self.build_detection_segments(detections, gap_tolerance_ms=self.gap_tolerance_ms)
         clips_root = Path(self.clips_path)
         detection_out = clips_root
-        written_detections_1 = self.carve_segment_clips(
+        written_detections = self.carve_segment_clips(
             segments_detections,
             detection_out,
             make_relpath=partial(self._detection_clip_relpath, sanitize_species=self.sanitize_for_filename),
         )
-        self.build_detection_link_tree(written_detections_1, links_root=self.detection_links)
+        self.build_detection_link_tree(written_detections, links_root=self.detection_links)
         utilities = SQLServerUtilities(sp='sp_get_batch_metrics',
-                                          sql_server_connection=self.sqlserver_connection, params_values=14,
+                                       sql_server_connection=self.sqlserver_connection, params_values=batch_id,
                                        params='@BatchID=?', logger=self.logger)
         data_stats = utilities.run_sql_return_params()[0]
-        run_path = (Path(self.detection_links)
-                    / Path(f"Philippines_Cebu_Pacijan-Lake-Danao-Marsh-East_2026-09-03-111353_2026-09-03-125900")
-                    / Path(f"summary_batch_14.txt"))
+        run_path = Path(self.detection_links) / Path(directory) / Path(f"summary_batch_{batch_id}.txt")
         with open(run_path, "a") as summary:
             summary.write(f'Detections Summary: \n')
             summary.write(str(data_stats[0]) + ' 3 second chunks with detections.\n')
@@ -967,7 +959,7 @@ class BirdNetParser(BirdNetParserBase):
 
         columns = ['RunID', 'ClusterID', 'ChunkID', 'ClusterProbability', 'DeviceName',
                    'FileName', 'ChunkIndex', 'AbsStartMS', 'AbsEndMS', 'SegmentGroupID', 'Directory', 'StartSample',
-                   'EndSample']
+                   'EndSample','PeakDBFS']
         df = pd.DataFrame.from_records(rows, columns=columns)
 
         segments = []
@@ -982,6 +974,7 @@ class BirdNetParser(BirdNetParserBase):
                     run_id=row.RunID,
                     cluster_id=row.ClusterID,
                     cluster_probability=row.ClusterProbability,
+                    peak_dbfs=row.PeakDBFS,
                     file_stem=row.FileName,
                     chunk_index=row.ChunkIndex,
                     abs_start_ms=int(row.AbsStartMS.timestamp() * 1000),
@@ -991,10 +984,17 @@ class BirdNetParser(BirdNetParserBase):
                     directory=row.Directory,
                     device=row.DeviceName,
                     start_sample=row.StartSample,
-                    end_sample=row.EndSample
+                    end_sample=row.EndSample,
                 )
                 for row in group_df.itertuples()
             ]
+
+            # compute means with NaN guards
+            mean_prob = group_df['ClusterProbability'].mean()
+            avg_cluster_probability = int(round(mean_prob * 100)) if pd.notna(mean_prob) else None
+
+            mean_peak = group_df['PeakDBFS'].mean()
+            avg_peak_dbfs = int(mean_peak) if pd.notna(mean_peak) else None
 
             segments.append(Segment(
                 segment_type=SegmentType.CLUSTER,
@@ -1011,7 +1011,8 @@ class BirdNetParser(BirdNetParserBase):
                 members=members,
                 run_id=grp_run_id,
                 cluster_id=cluster_id,
-                avg_cluster_probability=group_df['ClusterProbability'].mean(),
+                avg_cluster_probability=avg_cluster_probability,
+                avg_peak_dbfs=avg_peak_dbfs,
                 segment_id=segment_id
             ))
         for segment in segments:
@@ -1034,7 +1035,7 @@ class BirdNetParser(BirdNetParserBase):
                 detection_id=item[0], chunk_id=item[1], model_id=item[2], species=item[3], confidence=item[4],
                 start_sample=item[5], end_sample=item[6], file_stem=file_stem, chunk_index=chunk_index,
                 abs_start_ms=abs_start_ms, abs_end_ms=abs_end_ms, directory=item[7], start_datetime=item[8],
-                end_datetime=item[9], device=item[10]
+                end_datetime=item[9], device=item[10], peak_dbfs=item[11]
             ))
         rows.sort(key=lambda r: (r.abs_start_ms))
         return rows
@@ -1099,6 +1100,13 @@ class BirdNetParser(BirdNetParserBase):
 
         return segment_id
 
+    def _compute_segment_stats(self, segment: Segment) -> None:
+        confidences = [m.confidence for m in segment.members if m.confidence is not None]
+        peaks = [m.peak_dbfs for m in segment.members if m.peak_dbfs is not None]
+
+        segment.avg_confidence = int(round(sum(confidences) / len(confidences) * 100)) if confidences else None
+        segment.avg_peak_dbfs = int(sum(peaks) / len(peaks)) if peaks else None
+
     def build_detection_segments(self, detections: list[DetectionRow], gap_tolerance_ms: int | None = None) -> list[
         Segment]:
         if gap_tolerance_ms is None:
@@ -1121,6 +1129,7 @@ class BirdNetParser(BirdNetParserBase):
                     current.members.append(row)
                     continue
                 else:
+                    self._compute_segment_stats(current)
                     current.segment_id = self._commit_segment(current)
                     segments.append(current)
                     current = None
@@ -1143,6 +1152,7 @@ class BirdNetParser(BirdNetParserBase):
             )
 
         if current is not None:
+            self._compute_segment_stats(current)
             current.segment_id = self._commit_segment(current)
             segments.append(current)
 

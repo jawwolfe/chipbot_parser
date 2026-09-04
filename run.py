@@ -46,6 +46,7 @@ PINECONE_KEY = config.PINECONE_KEY
 BIRDNET_MODEL_VERSION = config.BIRDNET_MODEL_VERSION
 GAP_TOLERANCE_MS = config.GAP_TOLERANCE_MS
 MIN_CLUSTER_PROBABILITY = config.MIN_CLUSTER_PROBABILITY
+SPECIES_IGNORE_2022_TAXONOMY = config.SPECIES_IGNORE_2022_TAXONOMY
 
 
 def initialize_logger():
@@ -93,14 +94,15 @@ parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, cluster
                       hdbscan_clusters=initialize_hdbscan(), analysis_run_text=ANALYSIS_RUN_TEXT,
                       analyze_file_group=ANALYZE_FILE_GROUP, overlap=OVERLAP,
                       sqlserver_connection=initialize_sqlserver(), pinecone_key=PINECONE_KEY,
-                      birdnet_model_version=BIRDNET_MODEL_VERSION, min_cluster_probability=MIN_CLUSTER_PROBABILITY)
+                      birdnet_model_version=BIRDNET_MODEL_VERSION, min_cluster_probability=MIN_CLUSTER_PROBABILITY,
+                      species_ignore=SPECIES_IGNORE_2022_TAXONOMY)
 
 clean = CleanSegments(logger=initialize_logger(), sqlserver_connection=initialize_sqlserver(),clips_path=CLIPS_PATH)
 #ids = clean.phase1_delete_files()
 # todo the delete ids is broken
 #clean.phase2_delete_db_rows(ids)
 
-parse.clusterer(site_list=[17])
+#parse.clusterer(site_list=[17])
 #parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
-#parse.run_cluster_segmentation(8)
-#parse.process()
+parse.run_cluster_segmentation(1066)
+#parse.detection_segmentation(17, 'Philippines_Cebu_Pacijan-Lake-Danao-Marsh-East_2026-09-03-111353_2026-09-03-125900')
