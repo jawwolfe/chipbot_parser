@@ -97,6 +97,7 @@ parse = BirdNetParser(logger=initialize_logger(), audio_path=AUDIO_PATH, cluster
 
 clean = CleanSegments(logger=initialize_logger(), sqlserver_connection=initialize_sqlserver(),clips_path=CLIPS_PATH)
 #ids = clean.phase1_delete_files()
+# todo the delete ids is broken
 #clean.phase2_delete_db_rows(ids)
 
 parse.clusterer(site_list=[17])

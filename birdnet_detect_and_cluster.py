@@ -883,8 +883,14 @@ class BirdNetParser(BirdNetParserBase):
                 utilities.run_sql_params()
 
         # enter clusters
+        centroids = {
+            cluster_num: X_normalized[df['cluster'].values == cluster_num].mean(axis=0)
+            for cluster_num in counts_dict
+        }
+
         for cluster_num, row_count in counts_dict.items():
-            run_params = (run_id, cluster_num, row_count, None, None)
+            centroid_blob = json.dumps(centroids[cluster_num].tolist())
+            run_params = (run_id, cluster_num, row_count, centroid_blob, None)
             utilities = SQLServerUtilities(sp='sp_insert_cluster', sql_server_connection=self.sqlserver_connection,
                                            params_values=run_params, params='@RunID=?, @ClusterID=?, @Size=?, '
                                                                             '@CentroidBlob=?, @Label=?',
