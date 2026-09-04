@@ -1196,7 +1196,8 @@ class BirdNetParser(BirdNetParserBase):
                 if out_path.exists():
                     self._ensure_clip_file_row(seg.segment_id, relpath)
                     written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id, seg.directory,
-                                   (seg.species or '').replace(' ', '_')))
+                                   (seg.species or '').replace(' ', '_'), seg.avg_confidence,
+                                    seg.avg_cluster_probability, seg.avg_peak_dbfs))
                     continue
 
                 all_data = bytearray()
@@ -1229,7 +1230,8 @@ class BirdNetParser(BirdNetParserBase):
 
                 self._insert_clip_file(seg.segment_id, relpath)
                 written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id, seg.directory,
-                                (seg.species or '').replace(' ', '_')))
+                                (seg.species or '').replace(' ', '_'), seg.avg_confidence,
+                                 seg.avg_cluster_probability, seg.avg_peak_dbfs))
             return written
         finally:
             cache.close_all()
@@ -1268,7 +1270,9 @@ class BirdNetParser(BirdNetParserBase):
 
         for record in cluster_clip_records:
             try:
-                run_id, cluster_id, src_path = (record[2], record[3], Path(self.clips_path) / Path(record[0] + '.wav'))
+                run_id, cluster_id, src_path, avg_peak_dbfs, avg_probability = (record[2], record[3],
+                                                                                   Path(self.clips_path) / Path(record[0] + '.wav'),
+                                                                                   record[8], record[7])
             except ValueError as e:
                 skipped.append((record, str(e)))
                 self.logger.error(str(e))
@@ -1287,8 +1291,10 @@ class BirdNetParser(BirdNetParserBase):
             data_stats = utilities.run_sql_return_params()[0]
             cluster_dir = links_root / f"run_{run_id}" / f"cluster_{cluster_id}_{data_stats[0]}min_{data_stats[1]}seg"
             cluster_dir.mkdir(parents=True, exist_ok=True)
+            seg_name = str(src_path.name)[:-4]
+            full_name = f"{seg_name}_{avg_probability}_{avg_peak_dbfs}.wav"
 
-            link_path = cluster_dir / src_path.name
+            link_path = cluster_dir / Path(full_name)
 
             # avoid crashing on a rebuild/re-run where the link already exists
             if link_path.exists():
@@ -1319,8 +1325,9 @@ class BirdNetParser(BirdNetParserBase):
 
         for record in detection_clip_records:
             try:
-                batch_dir, segment_id, src_path, species = (record[4], record[0],
-                                                   Path(self.clips_path) / Path(record[0] + '.wav'), record[5])
+                batch_dir, segment_id, src_path, species, avg_peak_dbfs, avg_min_confidence = (record[4], record[0],
+                                                   Path(self.clips_path) / Path(record[0] + '.wav'), record[5],
+                                                                                               record[8], record[6])
             except ValueError as e:
                 skipped.append((record, str(e)))
                 self.logger.error(str(e))
@@ -1335,7 +1342,7 @@ class BirdNetParser(BirdNetParserBase):
             batch_link_dir = links_root / str(batch_dir)
             batch_link_dir.mkdir(parents=True, exist_ok=True)
 
-            link_path = batch_link_dir / f"{species.replace(' ', '-')}_{segment_id.split('_')[1]}.wav"
+            link_path = batch_link_dir / f"{species.replace(' ', '-')}_{segment_id.split('_')[1]}_{avg_min_confidence}_{avg_peak_dbfs}.wav"
 
             # avoid crashing on a rebuild/re-run where the link already exists
             if link_path.exists():
