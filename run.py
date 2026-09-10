@@ -2,6 +2,7 @@ from birdnet_detect_and_cluster import BirdNetParser
 from clean_segments import CleanSegments
 from configs import config
 from pathlib import Path
+import requests
 
 from configs.config_sample import MIN_CLUSTER_PROBABILITY
 from ml_parameters.ml_parameters import UMAPParams, HDBSCANClusters
@@ -102,7 +103,8 @@ clean = CleanSegments(logger=initialize_logger(), sqlserver_connection=initializ
 # todo the delete ids is broken
 #clean.phase2_delete_db_rows(ids)
 
-parse.clusterer(site_list=[17])
-#parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
+
+#parse.clusterer(site_list=[17])
+parse.import_file_batch() # does everything from files import, embedding, and detection segmentation
 #parse.run_cluster_segmentation(1066)
 #parse.detection_segmentation(17, 'Philippines_Cebu_Pacijan-Lake-Danao-Marsh-East_2026-09-03-111353_2026-09-03-125900')

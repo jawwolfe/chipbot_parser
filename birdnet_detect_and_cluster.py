@@ -191,12 +191,15 @@ class BirdNetParser(BirdNetParserBase):
             return -np.inf
         return 20 * np.log10(peak_amplitude / 32768.0)  # ref = full int16 range
 
+
     def get_regions(self, gps_coordinates):
         lat, lon = gps_coordinates
 
         # Query Nominatim API with maximum address detail
         url = f"https://nominatim.openstreetmap.org/reverse?lat={lat}&lon={lon}&format=jsonv2&addressdetails=1"
-        headers = {"User-Agent": "global_level_extractor_script"}
+        headers = {
+            "User-Agent": "GlobalLevelExtractor/1.0 (contact: jawwolfe@gmail.com)"
+        }
 
         try:
             response = requests.get(url, headers=headers).json()

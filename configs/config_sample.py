@@ -7,7 +7,7 @@ if sys.platform == "win32":
 else:
     EXTERNAL_DRIVE = Path('/mnt/d')
     DRIVE_ROOT = Path("/mnt/c/")
-    SQLSERVER_NAME = '172.22.128.1,1434'
+    SQLSERVER_NAME = '127.0.0.1,14333'
 LOG_FILE_PATH = ''
 ROOT_PATH = DRIVE_ROOT / Path("temp/CHIPBOT_DATA_ROOT")
 SPECIES_LIST = ''
