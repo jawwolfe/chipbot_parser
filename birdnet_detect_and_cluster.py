@@ -579,7 +579,7 @@ class BirdNetParser(BirdNetParserBase):
                 chunk_id = file_path.stem + "_" + str(int(item_d['start_time'] / 3))
                 if item_d['scientific_name'] in self.species_ignore:
                     continue
-                key = (chunk_id, float(self.birdnet_model_version))
+                key = (chunk_id, float(self.birdnet_model_version), item_d['scientific_name'])
                 candidate = (chunk_id, float(self.birdnet_model_version),
                              item_d['common_name'] + ' (' + item_d['scientific_name'] + ')',
                              item_d['confidence'])
@@ -1122,6 +1122,8 @@ class BirdNetParser(BirdNetParserBase):
             gap_tolerance_ms = self.gap_tolerance_ms
         segments: list[Segment] = []
         current: Optional[Segment] = None
+
+        detections = sorted(detections, key=lambda r: (r.species, r.abs_start_ms))
 
         for row in detections:
             if current is not None:
