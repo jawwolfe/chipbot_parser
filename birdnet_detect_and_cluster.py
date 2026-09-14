@@ -202,7 +202,7 @@ class BirdNetParser(BirdNetParserBase):
         }
 
         try:
-            response = requests.get(url, headers=headers).json()
+            response = requests.get(url, headers=headers, timeout=120).json()
             address = response.get("address", {})
             # Handle village and hamlet combination logic
             village = address.get("village")
@@ -558,7 +558,6 @@ class BirdNetParser(BirdNetParserBase):
             i = 0
             insert_data_chunk = []
             insert_data_embed = []
-            insert_data_detect = []
             for item_m, item_e in zip(metadata, embeddings):
                 chunk_id_m = file_path.stem + "_" + str(int(item_m['start_time'] / 3))
                 vector_str = json.dumps(item_e.tolist())
@@ -574,14 +573,21 @@ class BirdNetParser(BirdNetParserBase):
                                           values[0], values[1], peak_db))
                 insert_data_embed.append((chunk_id_m, float(self.birdnet_model_version), vector_str))
                 i += 1
+
+            detect_by_key = {}
             for item_d in detections:
                 chunk_id = file_path.stem + "_" + str(int(item_d['start_time'] / 3))
                 if item_d['scientific_name'] in self.species_ignore:
                     continue
-                insert_data_detect.append((chunk_id, float(self.birdnet_model_version),
-                                           item_d['common_name'] + ' (' + item_d['scientific_name'] + ')',
-                                           item_d['confidence']))
-                
+                key = (chunk_id, float(self.birdnet_model_version))
+                candidate = (chunk_id, float(self.birdnet_model_version),
+                             item_d['common_name'] + ' (' + item_d['scientific_name'] + ')',
+                             item_d['confidence'])
+                if key not in detect_by_key or candidate[3] > detect_by_key[key][3]:
+                    detect_by_key[key] = candidate
+
+            insert_data_detect = list(detect_by_key.values())
+
             insert_sql = ("INSERT INTO Chunks (ChunkID, FileName, StartSample, EndSample, ChunkIndex, AbsStartMS, "
                           "AbsEndMS, PeakDBFS) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
             utilities = SQLServerUtilities(sql=insert_sql, sql_server_connection=self.sqlserver_connection,
