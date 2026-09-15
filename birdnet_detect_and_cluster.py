@@ -1050,22 +1050,25 @@ class BirdNetParser(BirdNetParserBase):
         return rows
 
     def _commit_segment(self, current: Segment) -> None:
-        run_params = (current.device, current.first_datetime, current.last_datetime, len(current.chunk_ids), None)
+        species_param = current.species if current.segment_type == SegmentType.DETECTION else None
+        run_params = (current.device, current.first_datetime, current.last_datetime, len(current.chunk_ids),
+                      species_param, None)
         utilities = SQLServerUtilities(sp='sp_insert_segment',
                                        sql_server_connection=self.sqlserver_connection,
                                        params_values=run_params,
                                        params='@DeviceName=?, @StartTime=?, @EndTime=?, @ChunkCount=?, '
-                                              '@NewSegmentID=? OUTPUT', logger=self.logger)
+                                              '@Species=?, @NewSegmentID=? OUTPUT', logger=self.logger)
         try:
             segment_id = utilities.run_sql_return_params()[0][0]
             is_new_segment = True
         except DatabaseIntegrityException:
             self.logger.error("Duplicate segment commit rolled back.")
-            run_params = (current.device, current.first_datetime, current.last_datetime)
+            run_params = (current.device, current.first_datetime, current.last_datetime, species_param)
             utilities = SQLServerUtilities(sp='sp_get_segment_id',
                                            sql_server_connection=self.sqlserver_connection,
                                            params_values=run_params,
-                                           params='@DeviceName=?, @StartTime=?, @EndTime=?', logger=self.logger)
+                                           params='@DeviceName=?, @StartTime=?, @EndTime=?, @Species=?',
+                                           logger=self.logger)
             segment_id = utilities.run_sql_return_params()[0][0]
             is_new_segment = False
 
