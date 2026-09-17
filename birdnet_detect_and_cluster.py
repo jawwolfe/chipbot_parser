@@ -1211,7 +1211,7 @@ class BirdNetParser(BirdNetParserBase):
                     self._ensure_clip_file_row(seg.segment_id, relpath)
                     written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id, seg.directory,
                                    (seg.species or '').replace(' ', '_'), seg.avg_confidence,
-                                    seg.avg_cluster_probability, seg.avg_peak_dbfs))
+                                    seg.avg_cluster_probability, seg.avg_peak_dbfs, seg.first_datetime))
                     continue
 
                 all_data = bytearray()
@@ -1245,7 +1245,7 @@ class BirdNetParser(BirdNetParserBase):
                 self._insert_clip_file(seg.segment_id, relpath)
                 written.append((relpath.stem, str(out_path), seg.run_id, seg.cluster_id, seg.directory,
                                 (seg.species or '').replace(' ', '_'), seg.avg_confidence,
-                                 seg.avg_cluster_probability, seg.avg_peak_dbfs))
+                                 seg.avg_cluster_probability, seg.avg_peak_dbfs, seg.first_datetime))
             return written
         finally:
             cache.close_all()
@@ -1284,9 +1284,8 @@ class BirdNetParser(BirdNetParserBase):
 
         for record in cluster_clip_records:
             try:
-                run_id, cluster_id, src_path, avg_peak_dbfs, avg_probability = (record[2], record[3],
-                                                                                   Path(self.clips_path) / Path(record[0] + '.wav'),
-                                                                                   record[8], record[7])
+                run_id, cluster_id, src_path, avg_peak_dbfs, avg_probability, start_time = (record[2], record[3], Path(self.clips_path) / Path(record[0]
+                                                                               + '.wav'), record[8], record[7], record[9].strftime("%H%M"))
             except ValueError as e:
                 skipped.append((record, str(e)))
                 self.logger.error(str(e))
@@ -1306,8 +1305,7 @@ class BirdNetParser(BirdNetParserBase):
             cluster_dir = links_root / f"run_{run_id}" / f"cluster_{cluster_id}_{data_stats[0]}min_{data_stats[1]}seg"
             cluster_dir.mkdir(parents=True, exist_ok=True)
             seg_name = str(src_path.name)[:-4]
-            full_name = f"{seg_name}_{avg_probability}_{avg_peak_dbfs}.wav"
-
+            full_name = f"cluster_{cluster_id}_{seg_name}_{start_time}_{avg_probability}_{avg_peak_dbfs}.wav"
             link_path = cluster_dir / Path(full_name)
 
             # avoid crashing on a rebuild/re-run where the link already exists
