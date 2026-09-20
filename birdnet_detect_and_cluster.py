@@ -26,8 +26,8 @@ from enum import Enum
 from functools import partial
 
 IGNORED_LABEL = "unidentified/ambient"
-DEFAULT_LAT = '10.6608806'
-DEFAULT_LONG = '124.3595418'
+DEFAULT_LAT = '10.669535'
+DEFAULT_LONG = '124.339787'
 CLUSTER_ALGORITHM = 'HDBSCAN'
 
 @dataclass
@@ -624,6 +624,34 @@ class BirdNetParser(BirdNetParserBase):
                     self.logger.error(msg)
 
         self.logger.info("This batch extraction and storage complete.")
+
+
+    def import_phone_batch(self):
+        self.logger.info("Begin script importing phone files.")
+        audio_extensions = {".wav"}
+        audio_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in audio_extensions]
+        if not audio_files_ext:
+            msg = f"No matching audio (.wav) files found in external_drive: {self.external_drive}"
+            self.logger.error(msg)
+            raise VerifyFileException(msg)
+        # clean files:  add _ between date and time, add 00 seconds, append GPS default
+        for file in audio_files_ext:
+            name = "".join(file.stem.rsplit("_", 1))
+            new_name = 'oneplus13-cph2655_' + name.replace(' ', '-') + '00_' +  DEFAULT_LAT + '_' + DEFAULT_LONG + '.wav'
+            print(new_name)
+
+
+        sys.exit()
+        # now with one clean batch proceed as chipbot
+        audio_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in audio_extensions]
+        c = 0
+        sorted_data = sorted(batch['data'], key=lambda x: x['Filename'])
+        first_dict = sorted_data[0]
+        last_dict = sorted_data[-1]
+        first_timestamp = first_dict['Filename'].split('_')[-3]
+        last_timestamp = last_dict['Filename'].split('_')[-3]
+        my_file_parts = first_dict['Filename'].split("_")
+        gps = my_file_parts[2], my_file_parts[3]
 
 
     def import_file_batch(self):
@@ -1337,9 +1365,9 @@ class BirdNetParser(BirdNetParserBase):
 
         for record in detection_clip_records:
             try:
-                batch_dir, segment_id, src_path, species, avg_peak_dbfs, avg_min_confidence = (record[4], record[0],
+                batch_dir, segment_id, src_path, species, avg_peak_dbfs, avg_min_confidence, start_time = (record[4], record[0],
                                                    Path(self.clips_path) / Path(record[0] + '.wav'), record[5],
-                                                                                               record[8], record[6])
+                                                                                               record[8], record[6], record[9].strftime("%H%M"))
             except ValueError as e:
                 skipped.append((record, str(e)))
                 self.logger.error(str(e))
@@ -1354,7 +1382,7 @@ class BirdNetParser(BirdNetParserBase):
             batch_link_dir = links_root / str(batch_dir)
             batch_link_dir.mkdir(parents=True, exist_ok=True)
 
-            link_path = batch_link_dir / f"{species.replace(' ', '-')}_{segment_id.split('_')[1]}_{avg_min_confidence}_{avg_peak_dbfs}.wav"
+            link_path = batch_link_dir / f"{species.replace(' ', '-')}_{segment_id.split('_')[1]}_{start_time}_{avg_min_confidence}_{avg_peak_dbfs}.wav"
 
             # avoid crashing on a rebuild/re-run where the link already exists
             if link_path.exists():
@@ -1374,3 +1402,22 @@ class BirdNetParser(BirdNetParserBase):
             f"Built detection link tree at {links_root}: {linked_count} linked, {len(skipped)} skipped."
         )
         return linked_count, skipped
+
+    def rename(self):
+        AUDIO_DIR = self.detection_links / Path("Philippines_Cebu_Pacijan-Lake-Danao-Marsh-West_2026-09-16-154233_2026-09-16-202739")
+
+        utilities = SQLServerUtilities(sp='sp_get_rename_batches',
+                                       sql_server_connection=self.sqlserver_connection,
+                                       logger=self.logger)
+        segments = utilities.run_sql_return_no_params()
+        for segment in segments:
+            for root, _, files in os.walk(AUDIO_DIR):
+                for file in files:
+                    if str(segment[0])  in file:
+                        file_path = Path(root) / file
+                        parts = file.rsplit("_", 2)
+                        if len(parts) == 3:
+                            new_name = f"{parts[0]}_{segment[1]}_{parts[1]}_{parts[2]}"
+                            new_file_path = file_path.parent / new_name
+                            print(new_file_path)
+                            file_path.rename(new_file_path)

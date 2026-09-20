@@ -13,7 +13,7 @@ def parse_num2(filename):
     Example: Watercock_(Gallicrex_cinerea)_178_34_-24.wav -> returns 34
     Returns integer Num2 if valid, otherwise None.
     """
-    pattern = r"^.+?_(\d+)_(-?\d+)\.wav$"
+    pattern = r"^.+?_(\d+)_(\d+)_(-?\d+)\.wav$"
     match = re.match(pattern, filename, re.IGNORECASE)
 
     if match:
@@ -168,7 +168,7 @@ def play_top_3_per_directory(
 
         # Check start directory condition
         if not should_play:
-            if folder_name.lower() == normalized_start_dir or root.lower().endswith(normalized_start_dir):
+            if normalized_start_dir in folder_name.lower() or normalized_start_dir in root.lower():
                 should_play = True
             else:
                 print(f"Skipping directory '{folder_name}' (waiting for start target)")
@@ -222,13 +222,13 @@ def play_top_3_per_directory(
 
 
 if __name__ == "__main__":
-    AUDIO_DIR = Path("/mnt/c/") / Path("temp/CHIPBOT_DATA_ROOT") / Path("links_clusters/run_2")
+    AUDIO_DIR = Path("/mnt/c/") / Path("temp/CHIPBOT_DATA_ROOT") / Path("links_clusters/run_1")
     GAIN_BOOST = 25.0
-    MAX_DURATION_MS = 250000  # 45 seconds max duration
+    MAX_DURATION_MS = 60000  # 45 seconds max duration
     PAUSE_SEC = 1  # Pause duration in seconds
 
-    # Set to a directory folder name to start playback, or "" / None to play from beginning
-    START_DIR = "cluster_240_4min_4seg"
+    # Set to a directory folder name to   start playback, or "" / None to play from beginning
+    START_DIR = "cluster_89"
 
     play_top_3_per_directory(
         AUDIO_DIR,

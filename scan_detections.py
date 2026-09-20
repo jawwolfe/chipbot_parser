@@ -12,7 +12,7 @@ def parse_filename(filename):
     Parses filenames structured like: Name_(Species)_Num1_Num2_Gain.wav
     Example: Clamorous_Reed_Warbler_(Acrocephalus_stentoreus)_46_40_-36.wav
     """
-    pattern = r"^(.+?)_\((.+?)\)_(\d+)_(\d+)_(-?\d+)\.wav$"
+    pattern = r"^(.+?)_\((.+?)\)_(\d+)_(\d+)_(\d+)_(-?\d+)\.wav$"
     match = re.match(pattern, filename, re.IGNORECASE)
 
     if match:
@@ -225,14 +225,14 @@ def play_top_3_num2_per_name(
 
 if __name__ == "__main__":
     # Replace with your target folder path
-    AUDIO_DIR = Path("/mnt/c/") / Path("temp/CHIPBOT_DATA_ROOT") / Path("links_detections/Philippines_Cebu_Pacijan-Campo-Wenceslao_2026-09-14-161758_2026-09-14-201802")
+    AUDIO_DIR = Path("/mnt/c/") / Path("temp/CHIPBOT_DATA_ROOT") / Path("links_detections/Philippines_Cebu_Pacijan-Lake-Danao-Marsh-West_2026-09-17-150033_2026-09-17-201546")
     GAIN_BOOST = 25.0  # Gain boost in dB
     MAX_DURATION_MS = 45000  # 4,000 ms = 4 seconds
-    PAUSE_SEC = 3  # Pause duration in seconds
+    PAUSE_SEC = 1 # Pause duration in seconds
 
     # Set to a species name to start playback from that point.
     # Set to None to play from the beginning.
-    START_SPECIES = "Brown Boobook"
+    START_SPECIES = ""
 
     play_top_3_num2_per_name(
         AUDIO_DIR,
