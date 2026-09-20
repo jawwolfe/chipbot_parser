@@ -16,6 +16,7 @@ from mu_utilities.exceptions import DatabaseIntegrityException
 from exceptions import RawAudioBatchException, VerifyFileException
 from pinecone import Pinecone
 from operator import itemgetter
+import librosa
 import soundfile as sf
 from tensorflow.python.ops.linalg.sparse.gen_sparse_csr_matrix_ops import sparse_matrix_sparse_mat_mul
 from itertools import groupby
@@ -113,7 +114,7 @@ class WavCache:
             path = Path(directory) / f"{file_stem}.wav"
             if not path.is_file():
                 raise FileNotFoundError(f"Source WAV not found: {path}")
-            wf = wave.open(str(path), "rb")
+            wf = SoundFileWaveCompat(path)
             self._handles[key] = wf
             self._params[key] = wf.getparams()
         return self._handles[key]
@@ -125,6 +126,67 @@ class WavCache:
     def close_all(self):
         for wf in self._handles.values():
             wf.close()
+
+from collections import namedtuple
+
+WaveParams = namedtuple('WaveParams', ['nchannels', 'sampwidth', 'framerate', 'nframes', 'comptype', 'compname'])
+
+class SoundFileWaveCompat:
+    """Wraps soundfile to expose the subset of the wave.Wave_read API this codebase uses."""
+    def __init__(self, path):
+        self._sf = sf.SoundFile(str(path))
+        self._pos = 0
+
+        subtype_to_sampwidth = {
+            'PCM_16': 2, 'PCM_24': 3, 'PCM_32': 4,
+            'FLOAT': 4, 'DOUBLE': 8, 'PCM_U8': 1,
+        }
+        self._sampwidth = subtype_to_sampwidth.get(self._sf.subtype, 2)
+        self._is_float = self._sf.subtype in ('FLOAT', 'DOUBLE')
+
+    def getparams(self):
+        return WaveParams(
+            nchannels=self._sf.channels,
+            sampwidth=2,  # always 2: readframes() always converts to int16
+            framerate=self._sf.samplerate,
+            nframes=len(self._sf),
+            comptype='NONE',
+            compname='not compressed',
+        )
+
+    def getnchannels(self):
+        return self._sf.channels
+
+    def getsampwidth(self):
+        return 2
+
+    def getframerate(self):
+        return self._sf.samplerate
+
+    def getnframes(self):
+        return len(self._sf)
+
+    def readframes(self, n):
+        self._sf.seek(self._pos)
+        data = self._sf.read(n, dtype='float32' if self._is_float else 'int16', always_2d=False)
+        self._pos += len(data)
+        if self._is_float:
+            # convert to int16 PCM bytes so downstream code (expecting raw PCM frames) still works
+            data = np.clip(data, -1.0, 1.0)
+            data = (data * 32767).astype(np.int16)
+        else:
+            data = data.astype(np.int16)
+        return data.tobytes()
+
+    def setpos(self, pos):
+        self._pos = pos
+        self._sf.seek(pos)
+
+    def tell(self):
+        return self._pos
+
+    def close(self):
+        self._sf.close()
 
 class BirdNetParser(BirdNetParserBase):
     def __init__(self, logger, external_drive, audio_path, cluster_links, detection_links,clips_path, min_confidence,
@@ -563,7 +625,7 @@ class BirdNetParser(BirdNetParserBase):
                 vector_str = json.dumps(item_e.tolist())
                 values = self.get_abs_chunks_datetime(item_m['file'][:-4], item_m['start_time'], item_m['end_time'])
 
-                # NEW
+                audio_samples, sample_rate = librosa.load(file_path, sr=None)
                 start_sample = int(item_m['start_time'] * sample_rate)
                 end_sample = int(item_m['end_time'] * sample_rate)
                 chunk_samples = audio_samples[start_sample:end_sample]
@@ -636,22 +698,77 @@ class BirdNetParser(BirdNetParserBase):
             raise VerifyFileException(msg)
         # clean files:  add _ between date and time, add 00 seconds, append GPS default
         for file in audio_files_ext:
-            name = "".join(file.stem.rsplit("_", 1))
-            new_name = 'oneplus13-cph2655_' + name.replace(' ', '-') + '00_' +  DEFAULT_LAT + '_' + DEFAULT_LONG + '.wav'
-            print(new_name)
-
-
-        sys.exit()
+            # see if file has been renamed or not
+            if 'oneplus13-cph2655' not in file.name:
+                name = "".join(file.stem.rsplit("_", 1))
+                new_name = 'oneplus13-cph2655_' + name.replace(' ', '-') + '00_' +  DEFAULT_LAT + '_' + DEFAULT_LONG + '.wav'
+                new_full_path_name = file.parent / new_name
+                os.rename(file, new_full_path_name)
         # now with one clean batch proceed as chipbot
         audio_files_ext = [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in audio_extensions]
         c = 0
-        sorted_data = sorted(batch['data'], key=lambda x: x['Filename'])
-        first_dict = sorted_data[0]
-        last_dict = sorted_data[-1]
-        first_timestamp = first_dict['Filename'].split('_')[-3]
-        last_timestamp = last_dict['Filename'].split('_')[-3]
-        my_file_parts = first_dict['Filename'].split("_")
-        gps = my_file_parts[2], my_file_parts[3]
+        audio_files_ext = sorted(
+            [f for f in Path(self.external_drive).iterdir() if f.suffix.lower() in audio_extensions]
+        )
+        first_timestamp = audio_files_ext[0].stem.split('_')[1]
+        last_timestamp = audio_files_ext[-1].stem.split('_')[1]
+        device_name = audio_files_ext[0].stem.split('_')[0]
+        gps = audio_files_ext[0].stem.split('_')[2], audio_files_ext[0].stem.split('_')[3]
+        utilities = SQLServerUtilities(sp='sp_get_site_by_coordinates',
+                                       sql_server_connection=self.sqlserver_connection,
+                                       params_values=gps, params='@Latitude=?, @Longitude=?', logger=self.logger)
+        site_data = utilities.run_sql_return_params()
+        if not site_data:
+            msg = f"This file's GPS coordinates cant not be found in an existing site:\n"
+            self.logger.error(msg)
+            raise RawAudioBatchException(msg)
+        my_locations = self.get_regions(gps)
+        location_params = (my_locations['country'], my_locations['region'], my_locations['province'],
+                           my_locations['municipality'], my_locations['local'], site_data[0][0])
+        utilities = SQLServerUtilities(sp='sp_get_insert_location',
+                                       sql_server_connection=self.sqlserver_connection,
+                                       params_values=location_params, params='@Level1=?, @Level2=?, @Level3=?, '
+                                                                             '@Level4=?, @Level5=?, @SiteID=?',
+                                       logger=self.logger)
+        location_id = utilities.run_sql_return_params()[0][0]
+        lon = gps[1]
+        lat = gps[0]
+        gps_wkt = f"POINT({lon} {lat})"
+        my_site_name = site_data[0][1].replace(' ', '-')
+        my_country = my_locations['country'].replace(' ', '-')
+        my_province = my_locations['province'].replace(' ', '-')
+        archive_stem = (my_country + "_" + my_province + "_" + my_site_name + '_' +
+                        first_timestamp + "_" + last_timestamp)
+        batch_params = (device_name, gps_wkt, location_id, first_timestamp, last_timestamp, archive_stem)
+        utilities = SQLServerUtilities(sp='sp_get_insert_batch', sql_server_connection=self.sqlserver_connection,
+                                       params_values=batch_params, params='@DeviceName=?, @GpsCoordinatesText=?, '
+                                                                          '@LocationID=?, @BatchStart=?, '
+                                                                          '@BatchEnd=?, @Directory=?',
+                                       logger=self.logger)
+        batch_id = utilities.run_sql_return_params()[0][0]
+        self.logger.info(
+            f"Processing {len(audio_files_ext)} files in batch: {device_name}_{first_timestamp}_{last_timestamp}_{lat}_{lon}")
+        archive_dir = Path(self.audio_path) / Path(archive_stem)
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        for my_file in audio_files_ext:
+            file_length = self.get_wav_duration(my_file)
+            datetime_start = my_file.stem.split('_')[1]
+            file_name = my_file.stem
+            file_params = (batch_id, file_name, datetime_start, file_length)
+            utilities = SQLServerUtilities(sp='sp_get_insert_file',
+                                           sql_server_connection=self.sqlserver_connection,
+                                           params_values=file_params, params='@BatchID=?, @FileFullName=?, '
+                                                                             '@DatetimeStart=?, @Length=?',
+                                           logger=self.logger)
+            self.logger.info(f"Processing File: {file_name}")
+            file_id = utilities.run_sql_return_params()[0][0]
+            # move file to archive
+            shutil.move(my_file, archive_dir)
+        self.logger.info("This phone batch has been processed and moved to archive.")
+        self.logger.info("Begin Birdnet Embedding and Database insert.")
+        # now insert all embeddings for this batch into SQL Server
+        self.extract_and_store(source_audio_dir=archive_dir)
+        self.detection_segmentation(batch_id=batch_id, directory=archive_stem)
 
 
     def import_file_batch(self):
